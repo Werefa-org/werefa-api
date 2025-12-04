@@ -69,6 +69,11 @@ keep-runtime-typing = true
 [tool.coverage.run]
 source = ["werefa"]
 dynamic_context = "test_function"
+omit = [
+    "werefa/initial_data.py",
+    "werefa/backend_pre_start.py",
+    "werefa/tests_pre_start.py",
+]
 
 [tool.coverage.report]
 show_missing = true

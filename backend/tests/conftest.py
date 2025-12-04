@@ -9,7 +9,13 @@ from tests.utils.utils import get_superuser_token_headers
 from werefa.core.config import settings
 from werefa.core.db import engine, init_db
 from werefa.main import app
-from werefa.models import Item, User
+from werefa.models import (
+    Provider,
+    ProviderMembership,
+    QueueEntry,
+    ServiceItem,
+    User,
+)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -17,10 +23,11 @@ def db() -> Generator[Session, None, None]:
     with Session(engine) as session:
         init_db(session)
         yield session
-        statement = delete(Item)
-        session.execute(statement)
-        statement = delete(User)
-        session.execute(statement)
+        session.exec(delete(QueueEntry))
+        session.exec(delete(ServiceItem))
+        session.exec(delete(ProviderMembership))
+        session.exec(delete(Provider))
+        session.exec(delete(User))
         session.commit()
 
 
