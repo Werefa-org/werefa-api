@@ -6,7 +6,13 @@ from sqlmodel import col, select
 
 from werefa import crud
 from werefa.api.deps import CurrentUser, SessionDep, ensure_provider_staff
-from werefa.models import Provider, ServiceItem, ServiceItemCreate, ServiceItemPublic, ServiceItemUpdate
+from werefa.models import (
+    Provider,
+    ServiceItem,
+    ServiceItemCreate,
+    ServiceItemPublic,
+    ServiceItemUpdate,
+)
 
 router = APIRouter(prefix="/providers/{provider_id}/services", tags=["service-items"])
 
