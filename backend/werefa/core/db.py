@@ -1,8 +1,8 @@
 from sqlmodel import Session, create_engine, select
 
-from werefa import crud
 from werefa.core.config import settings
-from werefa.models import User, UserCreate
+from werefa.identity.infrastructure import repo as identity_repo
+from werefa.shared.models import User, UserCreate
 
 engine = create_engine(str(settings.SQLALCHEMY_DATABASE_URI))
 
@@ -30,4 +30,4 @@ def init_db(session: Session) -> None:
             password=settings.FIRST_SUPERUSER_PASSWORD,
             is_superuser=True,
         )
-        user = crud.create_user(session=session, user_create=user_in)
+        user = identity_repo.create_user(session=session, user_create=user_in)
