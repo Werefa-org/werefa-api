@@ -4,8 +4,8 @@ from typing import Any
 from fastapi import APIRouter
 
 from werefa.api.deps import CurrentUser, SessionDep, ensure_provider_staff
-from werefa.components.service_items.application import service as service_item_service
-from werefa.models import ServiceItemCreate, ServiceItemPublic, ServiceItemUpdate
+from werefa.service_items.application import service as service_item_service
+from werefa.shared.models import ServiceItemCreate, ServiceItemPublic, ServiceItemUpdate
 
 router = APIRouter(prefix="/providers/{provider_id}/services", tags=["service-items"])
 

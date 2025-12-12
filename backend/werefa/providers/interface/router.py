@@ -10,8 +10,8 @@ from werefa.api.deps import (
     ensure_provider_owner_or_super,
     ensure_provider_staff,
 )
-from werefa.components.providers.application import service as provider_service
-from werefa.models import (
+from werefa.providers.application import service as provider_service
+from werefa.shared.models import (
     MembershipCreate,
     MembershipPublic,
     ProviderCreate,

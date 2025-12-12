@@ -3,8 +3,13 @@ import uuid
 from fastapi import HTTPException
 from sqlmodel import Session, col, select
 
-from werefa import crud
-from werefa.models import Provider, ServiceItem, ServiceItemCreate, ServiceItemUpdate
+from werefa.service_items.infrastructure import repo as service_item_repo
+from werefa.shared.models import (
+    Provider,
+    ServiceItem,
+    ServiceItemCreate,
+    ServiceItemUpdate,
+)
 
 
 def list_service_items(session: Session, provider_id: uuid.UUID) -> list[ServiceItem]:
@@ -24,7 +29,9 @@ def create_service_item(
 ) -> ServiceItem:
     if session.get(Provider, provider_id) is None:
         raise HTTPException(status_code=404, detail="Provider not found")
-    return crud.create_service_item(session=session, provider_id=provider_id, body=body)
+    return service_item_repo.create_service_item(
+        session=session, provider_id=provider_id, body=body
+    )
 
 
 def update_service_item(

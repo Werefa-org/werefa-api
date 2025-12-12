@@ -5,9 +5,9 @@ from fastapi import APIRouter, HTTPException
 from sqlmodel import col, select
 
 from werefa.api.deps import CurrentUser, SessionDep, ensure_provider_staff
-from werefa.components.queue.application import service as queue_service
-from werefa.enums import TicketStatus
-from werefa.models import (
+from werefa.queue.application import service as queue_service
+from werefa.shared.enums import TicketStatus
+from werefa.shared.models import (
     QueueEntriesPublic,
     QueueEntry,
     QueueEntryPublic,

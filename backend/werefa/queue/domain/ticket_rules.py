@@ -1,4 +1,4 @@
-from werefa.enums import TicketStatus
+from werefa.shared.enums import TicketStatus
 
 
 def active_status_values() -> tuple[str, ...]:

@@ -4,9 +4,9 @@ from collections.abc import Sequence
 from fastapi import HTTPException, status
 from sqlmodel import Session, col, select
 
-from werefa.components.queue.domain import ticket_rules
-from werefa.enums import TicketSource, TicketStatus
-from werefa.models import Provider, QueueEntry, ServiceItem, User, utcnow
+from werefa.queue.domain import ticket_rules
+from werefa.shared.enums import TicketSource, TicketStatus
+from werefa.shared.models import Provider, QueueEntry, ServiceItem, User, utcnow
 
 
 def assert_single_active_ticket(session: Session, user_id: uuid.UUID) -> None:

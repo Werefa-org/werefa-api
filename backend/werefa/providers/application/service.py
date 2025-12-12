@@ -3,10 +3,10 @@ import uuid
 from fastapi import HTTPException
 from sqlmodel import Session, col, select
 
-from werefa import crud
-from werefa.components.providers.domain import membership_rules
-from werefa.enums import MembershipRole
-from werefa.models import (
+from werefa.providers.domain import membership_rules
+from werefa.providers.infrastructure import repo as provider_repo
+from werefa.shared.enums import MembershipRole
+from werefa.shared.models import (
     MembershipCreate,
     Provider,
     ProviderCreate,
@@ -17,11 +17,11 @@ from werefa.models import (
 
 
 def create_provider(session: Session, body: ProviderCreate) -> Provider:
-    return crud.create_provider(session=session, body=body)
+    return provider_repo.create_provider(session=session, body=body)
 
 
 def get_provider_by_slug(session: Session, slug: str) -> Provider | None:
-    return crud.get_provider_by_slug(session=session, slug=slug)
+    return provider_repo.get_provider_by_slug(session=session, slug=slug)
 
 
 def get_provider(session: Session, provider_id: uuid.UUID) -> Provider | None:
@@ -49,7 +49,7 @@ def add_provider_member(
         raise HTTPException(status_code=404, detail="Provider not found")
     if session.get(User, body.user_id) is None:
         raise HTTPException(status_code=404, detail="User not found")
-    if crud.get_membership(
+    if provider_repo.get_membership(
         session=session, provider_id=provider_id, user_id=body.user_id
     ):
         raise HTTPException(status_code=409, detail="User is already a member")
@@ -78,7 +78,7 @@ def list_provider_members(
 def remove_provider_member(
     session: Session, provider_id: uuid.UUID, member_user_id: uuid.UUID
 ) -> ProviderMembership:
-    row = crud.get_membership(
+    row = provider_repo.get_membership(
         session=session, provider_id=provider_id, user_id=member_user_id
     )
     if row is None:
