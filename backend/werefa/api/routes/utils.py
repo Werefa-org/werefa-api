@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from pydantic.networks import EmailStr
 
 from werefa.api.deps import get_current_active_superuser
-from werefa.models import Message
+from werefa.shared.models import Message
 from werefa.utils import generate_test_email, send_email
 
 router = APIRouter(prefix="/utils", tags=["utils"])

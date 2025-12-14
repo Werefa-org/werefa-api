@@ -6,9 +6,9 @@ from sqlmodel import Session
 
 from tests.utils.user import user_authentication_headers
 from tests.utils.utils import random_email, random_lower_string
-from werefa import crud
 from werefa.core.config import settings
-from werefa.models import UserCreate
+from werefa.identity.infrastructure import repo as identity_repo
+from werefa.shared.models import UserCreate
 
 
 def test_provider_queue_flow(
@@ -17,7 +17,7 @@ def test_provider_queue_flow(
     superuser_token_headers: dict[str, str],
     normal_user_token_headers: dict[str, str],
 ) -> None:
-    su = crud.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
+    su = identity_repo.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
     assert su is not None
     slug = f"demo-{uuid.uuid4().hex[:8]}"
 
@@ -133,13 +133,13 @@ def test_private_queue_access_code(
     db: Session,
     superuser_token_headers: dict[str, str],
 ) -> None:
-    su = crud.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
+    su = identity_repo.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
     assert su is not None
     slug = f"priv-{uuid.uuid4().hex[:8]}"
 
     email = random_email()
     password = random_lower_string()
-    crud.create_user(
+    identity_repo.create_user(
         session=db,
         user_create=UserCreate(email=email, password=password),
     )
@@ -212,7 +212,7 @@ def test_ticket_status_transition_rules(
 ) -> None:
     email = random_email()
     password = random_lower_string()
-    crud.create_user(
+    identity_repo.create_user(
         session=db,
         user_create=UserCreate(email=email, password=password),
     )
@@ -220,7 +220,7 @@ def test_ticket_status_transition_rules(
         client=client, email=email, password=password
     )
 
-    su = crud.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
+    su = identity_repo.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
     assert su is not None
 
     slug = f"trans-{uuid.uuid4().hex[:8]}"
@@ -278,12 +278,12 @@ def test_provider_membership_list_and_remove(
     db: Session,
     superuser_token_headers: dict[str, str],
 ) -> None:
-    su = crud.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
+    su = identity_repo.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
     assert su is not None
 
     email = random_email()
     password = random_lower_string()
-    new_user = crud.create_user(
+    new_user = identity_repo.create_user(
         session=db,
         user_create=UserCreate(email=email, password=password),
     )

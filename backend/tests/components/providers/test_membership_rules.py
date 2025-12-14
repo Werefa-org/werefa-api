@@ -1,6 +1,6 @@
 import pytest
 
-from werefa.components.providers.domain.membership_rules import (
+from werefa.providers.domain.membership_rules import (
     validate_remove_last_owner,
 )
 

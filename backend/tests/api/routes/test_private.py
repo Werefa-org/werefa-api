@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from werefa.core.config import settings
-from werefa.models import User
+from werefa.shared.models import User
 
 
 def test_create_user(client: TestClient, db: Session) -> None:

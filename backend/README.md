@@ -27,7 +27,7 @@ $ source .venv/bin/activate
 
 Make sure your editor is using the correct Python virtual environment, with the interpreter at `backend/.venv/bin/python`.
 
-Modify or add SQLModel models for data and SQL tables in `./backend/werefa/models.py`, API endpoints in `./backend/werefa/api/`, CRUD (Create, Read, Update, Delete) utils in `./backend/werefa/crud.py`.
+Modify or add SQLModel models for data and SQL tables in `./backend/werefa/shared/models.py`, API endpoints in `./backend/werefa/api/`, and feature repositories in `./backend/werefa/*/infrastructure/`.
 
 ## VS Code
 
