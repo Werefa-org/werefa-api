@@ -49,6 +49,8 @@ class Settings(BaseSettings):
         ]
 
     PROJECT_NAME: str = "Werefa API"
+    # Optional: enable cross-process real-time (queue WebSocket) fan-out. If unset, in-memory only.
+    REALTIME_REDIS_URL: str | None = None
     SENTRY_DSN: HttpUrl | None = None
     POSTGRES_SERVER: str
     POSTGRES_PORT: int = 5432
