@@ -159,6 +159,13 @@ def list_queue_entries(
 
 
 def call_next(session: Session, service_item_id: uuid.UUID) -> QueueEntry | None:
+    _, nxt = call_next_transition(session, service_item_id)
+    return nxt
+
+
+def call_next_transition(
+    session: Session, service_item_id: uuid.UUID
+) -> tuple[QueueEntry | None, QueueEntry | None]:
     get_service_for_update(session, service_item_id)
 
     current = session.exec(
@@ -182,13 +189,17 @@ def call_next(session: Session, service_item_id: uuid.UUID) -> QueueEntry | None
 
     if not nxt:
         session.commit()
-        return None
+        if current is not None:
+            session.refresh(current)
+        return current, None
 
     nxt.status = TicketStatus.serving.value
     session.add(nxt)
     session.commit()
+    if current is not None:
+        session.refresh(current)
     session.refresh(nxt)
-    return nxt
+    return current, nxt
 
 
 def set_ticket_status(

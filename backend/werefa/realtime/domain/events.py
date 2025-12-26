@@ -21,6 +21,9 @@ class QueueEventV1(BaseModel):
     v: int = 1
     type: str = Field(default=QueueEventType.queue_updated, min_length=1, max_length=64)
     service_item_id: uuid.UUID
+    ticket_id: uuid.UUID | None = None
+    status: str | None = Field(default=None, max_length=32)
+    position: int | None = Field(default=None, ge=1)
     occurred_at: datetime
     reason: str | None = Field(
         default=None,
@@ -33,10 +36,21 @@ class QueueEventV1(BaseModel):
         return v.isoformat()
 
     @classmethod
-    def build(cls, service_item_id: uuid.UUID, *, reason: str | None) -> "QueueEventV1":
+    def build(
+        cls,
+        service_item_id: uuid.UUID,
+        *,
+        ticket_id: uuid.UUID | None,
+        status: str | None,
+        position: int | None,
+        reason: str | None,
+    ) -> "QueueEventV1":
         return cls(
             type=QueueEventType.queue_updated,
             service_item_id=service_item_id,
+            ticket_id=ticket_id,
+            status=status,
+            position=position,
             occurred_at=utcnow(),
             reason=reason,
         )

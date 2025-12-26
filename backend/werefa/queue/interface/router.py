@@ -60,7 +60,9 @@ def join_queue(
         user=current_user,
         access_code=body.access_code,
     )
-    notify_queue_subscribers(service_item_id, reason="join")
+    notify_queue_subscribers(
+        session, service_item_id, ticket=ticket, reason="join"
+    )
     return QueueEntryPublic.model_validate(ticket)
 
 
@@ -83,7 +85,9 @@ def register_walk_in(
         service_item_id=service_item_id,
         guest_name=body.guest_name,
     )
-    notify_queue_subscribers(service_item_id, reason="walk_in")
+    notify_queue_subscribers(
+        session, service_item_id, ticket=ticket, reason="walk_in"
+    )
     return QueueEntryPublic.model_validate(ticket)
 
 
@@ -118,8 +122,17 @@ def call_next(
         current_user=current_user,
         provider_id=svc.provider_id,
     )
-    nxt = queue_service.call_next(session, service_item_id)
-    notify_queue_subscribers(service_item_id, reason="call_next")
+    current, nxt = queue_service.call_next_transition(session, service_item_id)
+    if current is not None:
+        notify_queue_subscribers(
+            session, service_item_id, ticket=current, reason="call_next"
+        )
+    if nxt is not None:
+        notify_queue_subscribers(
+            session, service_item_id, ticket=nxt, reason="call_next"
+        )
+    if current is None and nxt is None:
+        notify_queue_subscribers(session, service_item_id, reason="call_next")
     if nxt is None:
         return None
     return QueueEntryPublic.model_validate(nxt)
@@ -146,5 +159,7 @@ def update_ticket_status(
     row = queue_service.set_ticket_status(
         session, ticket_id, service_item_id, body.status
     )
-    notify_queue_subscribers(service_item_id, reason="status_update")
+    notify_queue_subscribers(
+        session, service_item_id, ticket=row, reason="status_update"
+    )
     return QueueEntryPublic.model_validate(row)
