@@ -1,7 +1,7 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from werefa.api.deps import (
     CurrentUser,
@@ -15,11 +15,40 @@ from werefa.shared.models import (
     MembershipCreate,
     MembershipPublic,
     ProviderCreate,
+    ProviderDiscoveriesPublic,
     ProviderPublic,
     ProviderUpdate,
 )
 
 router = APIRouter(prefix="/providers", tags=["providers"])
+
+
+@router.get("/discover", response_model=ProviderDiscoveriesPublic)
+def discover_providers(
+    *,
+    session: SessionDep,
+    latitude: float = Query(..., ge=-90, le=90),
+    longitude: float = Query(..., ge=-180, le=180),
+    radius_m: int | None = Query(default=None, ge=1),
+    query: str | None = Query(default=None, min_length=1, max_length=120),
+    include_private: bool = False,
+    only_open: bool = True,
+    include_paused: bool = False,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> Any:
+    return provider_service.discover_providers(
+        session,
+        latitude=latitude,
+        longitude=longitude,
+        radius_m=radius_m,
+        query=query,
+        include_private=include_private,
+        only_open=only_open,
+        include_paused=include_paused,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post("/", response_model=ProviderPublic)

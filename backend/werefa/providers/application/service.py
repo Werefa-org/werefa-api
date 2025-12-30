@@ -10,6 +10,8 @@ from werefa.shared.models import (
     MembershipCreate,
     Provider,
     ProviderCreate,
+    ProviderDiscoveriesPublic,
+    ProviderDiscoveryPublic,
     ProviderMembership,
     ProviderUpdate,
     User,
@@ -101,3 +103,54 @@ def remove_provider_member(
     session.delete(row)
     session.commit()
     return row
+
+
+def discover_providers(
+    session: Session,
+    *,
+    latitude: float,
+    longitude: float,
+    radius_m: int | None,
+    query: str | None,
+    include_private: bool,
+    only_open: bool,
+    include_paused: bool,
+    limit: int,
+    offset: int,
+) -> ProviderDiscoveriesPublic:
+    pairs = provider_repo.list_discoverable_providers(
+        session=session,
+        latitude=latitude,
+        longitude=longitude,
+        radius_m=radius_m,
+        query=query,
+        include_private=include_private,
+        only_open=only_open,
+        include_paused=include_paused,
+        limit=limit,
+        offset=offset,
+    )
+    data: list[ProviderDiscoveryPublic] = []
+    for p, distance in pairs:
+        active_tickets, serving_tickets, estimated_wait_minutes = (
+            provider_repo.provider_queue_hints(session=session, provider_id=p.id)
+        )
+        if active_tickets <= 5:
+            load_factor = "low"
+        elif active_tickets <= 15:
+            load_factor = "medium"
+        else:
+            load_factor = "high"
+        data.append(
+            ProviderDiscoveryPublic.model_validate(
+                p,
+                update={
+                    "distance_m": distance,
+                    "active_tickets": active_tickets,
+                    "serving_tickets": serving_tickets,
+                    "estimated_wait_minutes": estimated_wait_minutes,
+                    "load_factor": load_factor,
+                },
+            )
+        )
+    return ProviderDiscoveriesPublic(data=data, count=len(data))
