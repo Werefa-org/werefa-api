@@ -123,6 +123,8 @@ This document is the **high-level execution plan** for building Werefa on top of
 
 ## Phase 3 — Real-time updates
 
+**Status:** Core implementation completed (WebSocket streams, authz parity, Redis-ready fan-out, versioned events).
+
 **Goal:** Propagate queue state within NFR latency targets (spec: sub-second to few-second sync—validate in staging).
 
 **Work**
@@ -138,6 +140,8 @@ This document is the **high-level execution plan** for building Werefa on top of
 ---
 
 ## Phase 4 — Discovery and geospatial search
+
+**Status:** In progress (initial provider discovery endpoint with distance-based ordering and filters).
 
 **Goal:** “Near me” and provider discovery (FR-01 discovery aspects, UC-01).
 
