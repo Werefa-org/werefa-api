@@ -2,13 +2,17 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from pydantic import EmailStr
+from typing import Literal
+
+from pydantic import EmailStr, model_validator
 from sqlalchemy import Column, DateTime, Index, Numeric, UniqueConstraint, text
 from sqlmodel import Field, Relationship, SQLModel
+from typing_extensions import Self
 
 from werefa.shared.enums import (
     MembershipRole,
     TicketStatus,
+    UserType,
     VerificationStatus,
 )
 
@@ -26,16 +30,26 @@ class UserBase(SQLModel):
     is_superuser: bool = False
     full_name: str | None = Field(default=None, max_length=255)
     phone_number: str | None = Field(default=None, max_length=20)
+    user_type: str = Field(default=UserType.customer.value, max_length=32)
 
 
 class UserCreate(UserBase):
     password: str = Field(min_length=8, max_length=128)
+
+    @model_validator(mode="after")
+    def sync_user_type_with_superuser(self) -> Self:
+        if self.is_superuser:
+            self.user_type = UserType.admin.value
+        elif self.user_type == UserType.admin.value:
+            raise ValueError("admin user_type is only allowed for superuser accounts")
+        return self
 
 
 class UserRegister(SQLModel):
     email: EmailStr = Field(max_length=255)
     password: str = Field(min_length=8, max_length=128)
     full_name: str | None = Field(default=None, max_length=255)
+    user_type: Literal["customer", "provider"] = Field(default="customer")
 
 
 class UserUpdate(UserBase):
@@ -47,6 +61,7 @@ class UserUpdateMe(SQLModel):
     full_name: str | None = Field(default=None, max_length=255)
     email: EmailStr | None = Field(default=None, max_length=255)
     phone_number: str | None = Field(default=None, max_length=20)
+    user_type: Literal["provider"] | None = None
 
 
 class UpdatePassword(SQLModel):
