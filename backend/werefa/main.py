@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from starlette.middleware.cors import CORSMiddleware
 
+from werefa.api.error_handlers import register_exception_handlers
 from werefa.api.main import api_router
 from werefa.core.config import settings
 from werefa.realtime.lifespan import realtime_lifespan
@@ -30,6 +31,7 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     generate_unique_id_function=custom_generate_unique_id,
 )
+register_exception_handlers(app)
 
 # Set all CORS enabled origins
 if settings.all_cors_origins:

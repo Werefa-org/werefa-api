@@ -1,7 +1,8 @@
 from typing import Any
 
-from fastapi import APIRouter
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy.exc import IntegrityError
 
 from werefa.api.deps import SessionDep
 from werefa.core.security import get_password_hash
@@ -14,9 +15,9 @@ router = APIRouter(tags=["private"], prefix="/private")
 
 
 class PrivateUserCreate(BaseModel):
-    email: str
-    password: str
-    full_name: str
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    full_name: str | None = Field(default=None, max_length=255)
     is_verified: bool = False
 
 
@@ -27,12 +28,20 @@ def create_user(user_in: PrivateUserCreate, session: SessionDep) -> Any:
     """
 
     user = User(
-        email=user_in.email,
+        email=str(user_in.email),
         full_name=user_in.full_name,
         hashed_password=get_password_hash(user_in.password),
     )
 
     session.add(user)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A user with this email already exists.",
+        ) from None
+    session.refresh(user)
 
     return user
