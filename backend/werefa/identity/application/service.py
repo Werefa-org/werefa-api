@@ -8,6 +8,7 @@ from werefa.core import security
 from werefa.core.config import settings
 from werefa.core.security import get_password_hash, verify_password
 from werefa.identity.infrastructure import repo as identity_repo
+from werefa.shared.enums import UserType
 from werefa.shared.models import (
     Message,
     Token,
@@ -79,7 +80,25 @@ def update_user_me(session: Session, current_user: User, user_in: UserUpdateMe) 
             raise HTTPException(
                 status_code=409, detail="User with this email already exists"
             )
-    current_user.sqlmodel_update(user_in.model_dump(exclude_unset=True))
+    data = user_in.model_dump(exclude_unset=True)
+    if "user_type" in data:
+        if data["user_type"] != "provider":
+            raise HTTPException(
+                status_code=400,
+                detail="Only upgrading to provider is supported from this endpoint",
+            )
+        if current_user.is_superuser:
+            raise HTTPException(
+                status_code=400,
+                detail="Administrator accounts cannot change type here",
+            )
+        if current_user.user_type != UserType.customer.value:
+            raise HTTPException(
+                status_code=400,
+                detail="Only customer accounts can switch to provider this way",
+            )
+        data["user_type"] = UserType.provider.value
+    current_user.sqlmodel_update(data)
     session.add(current_user)
     session.commit()
     session.refresh(current_user)
@@ -156,6 +175,11 @@ def update_user(session: Session, user_id: uuid.UUID, user_in: UserUpdate) -> Us
     updated_user = identity_repo.update_user(
         session=session, db_user=db_user, user_in=user_in
     )
+    if updated_user.is_superuser and updated_user.user_type != UserType.admin.value:
+        updated_user.user_type = UserType.admin.value
+        session.add(updated_user)
+        session.commit()
+        session.refresh(updated_user)
     return User.model_validate(updated_user)
 
 

@@ -10,6 +10,7 @@ from werefa.core.config import settings
 from werefa.core.db import engine, init_db
 from werefa.core.security import get_password_hash
 from werefa.main import app
+from werefa.shared.enums import UserType
 from werefa.shared.models import (
     Provider,
     ProviderMembership,
@@ -30,6 +31,7 @@ def _sync_superuser_password_with_settings(session: Session) -> None:
     if user is None:
         return
     user.hashed_password = get_password_hash(settings.FIRST_SUPERUSER_PASSWORD)
+    user.user_type = UserType.admin.value
     session.add(user)
     session.commit()
     session.refresh(user)
@@ -55,6 +57,18 @@ def _expire_orm_caches_on_each_test(db: Session) -> Generator[None, None, None]:
     db.expire_all()
     yield
     db.expire_all()
+
+
+@pytest.fixture(autouse=True)
+def _clear_provider_and_queue_between_tests(db: Session) -> Generator[None, None, None]:
+    """Each test starts without leftover providers or queue rows from other tests."""
+    db.exec(delete(QueueEntry))
+    db.exec(delete(ServiceItem))
+    db.exec(delete(ProviderMembership))
+    db.exec(delete(Provider))
+    db.commit()
+    db.expire_all()
+    yield
 
 
 @pytest.fixture(scope="module")
