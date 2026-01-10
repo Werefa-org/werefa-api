@@ -1,3 +1,4 @@
+import secrets
 from collections.abc import Generator
 
 import pytest
@@ -7,11 +8,18 @@ from sqlmodel import Session, delete, select
 from tests.utils.user import authentication_token_from_email
 from tests.utils.utils import get_superuser_token_headers
 from werefa.core.config import settings
-from werefa.core.db import engine, init_db
-from werefa.core.security import get_password_hash
-from werefa.main import app
-from werefa.shared.enums import UserType
-from werefa.shared.models import (
+
+# Promote the JWT secret to a 32+ byte value before any module that might
+# import it captures the short ".env" default. This silences PyJWT's
+# `InsecureKeyLengthWarning` and exercises a production-like signature size.
+if len(settings.SECRET_KEY) < 32:
+    settings.SECRET_KEY = secrets.token_urlsafe(32)
+
+from werefa.core.db import engine, init_db  # noqa: E402
+from werefa.core.security import get_password_hash  # noqa: E402
+from werefa.main import app  # noqa: E402
+from werefa.shared.enums import UserType  # noqa: E402
+from werefa.shared.models import (  # noqa: E402
     Provider,
     ProviderMembership,
     QueueEntry,
@@ -61,14 +69,24 @@ def _expire_orm_caches_on_each_test(db: Session) -> Generator[None, None, None]:
 
 @pytest.fixture(autouse=True)
 def _clear_provider_and_queue_between_tests(db: Session) -> Generator[None, None, None]:
-    """Each test starts without leftover providers or queue rows from other tests."""
-    db.exec(delete(QueueEntry))
-    db.exec(delete(ServiceItem))
-    db.exec(delete(ProviderMembership))
-    db.exec(delete(Provider))
-    db.commit()
-    db.expire_all()
+    """Each test starts and ends without leftover providers or queue rows.
+
+    The double clear (before yield + after yield) protects against module-scoped
+    fixtures that might create state inside one test module and leak into the
+    next one's first test.
+    """
+
+    def _clear() -> None:
+        db.exec(delete(QueueEntry))
+        db.exec(delete(ServiceItem))
+        db.exec(delete(ProviderMembership))
+        db.exec(delete(Provider))
+        db.commit()
+        db.expire_all()
+
+    _clear()
     yield
+    _clear()
 
 
 @pytest.fixture(scope="module")
