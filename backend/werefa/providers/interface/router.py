@@ -10,6 +10,7 @@ from werefa.api.deps import (
     ensure_provider_staff,
 )
 from werefa.providers.application import service as provider_service
+from werefa.providers.application.service import provider_public_view
 from werefa.shared.enums import UserType
 from werefa.shared.models import (
     MembershipCreate,
@@ -77,7 +78,8 @@ def create_provider(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only provider or administrator accounts can create a business",
         )
-    return provider_service.create_provider(session, effective)
+    p = provider_service.create_provider(session, effective)
+    return ProviderPublic.model_validate(p, update=provider_public_view(p))
 
 
 @router.get("/by-slug/{slug}", response_model=ProviderPublic)
@@ -85,7 +87,7 @@ def read_provider_by_slug(*, session: SessionDep, slug: str) -> Any:
     p = provider_service.get_provider_by_slug(session, slug)
     if not p:
         raise HTTPException(status_code=404, detail="Provider not found")
-    return p
+    return ProviderPublic.model_validate(p, update=provider_public_view(p))
 
 
 @router.get("/{provider_id}", response_model=ProviderPublic)
@@ -93,7 +95,7 @@ def read_provider(*, session: SessionDep, provider_id: uuid.UUID) -> Any:
     p = provider_service.get_provider(session, provider_id)
     if not p:
         raise HTTPException(status_code=404, detail="Provider not found")
-    return p
+    return ProviderPublic.model_validate(p, update=provider_public_view(p))
 
 
 @router.patch("/{provider_id}", response_model=ProviderPublic)
@@ -107,7 +109,8 @@ def update_provider(
     ensure_provider_staff(
         session=session, current_user=current_user, provider_id=provider_id
     )
-    return provider_service.update_provider(session, provider_id, body)
+    p = provider_service.update_provider(session, provider_id, body)
+    return ProviderPublic.model_validate(p, update=provider_public_view(p))
 
 
 @router.post("/{provider_id}/members", response_model=MembershipPublic)
