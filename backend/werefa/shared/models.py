@@ -76,6 +76,13 @@ class User(UserBase, table=True):
         default_factory=utcnow,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    # Set when a strike accrual pushes the user past STRIKE_LIMIT, or by an
+    # admin override. ``None`` means "no active block"; a past timestamp is
+    # equivalent to no block (the active check uses ``> utcnow()``).
+    joins_blocked_until: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
     provider_memberships: list["ProviderMembership"] = Relationship(
         back_populates="user", cascade_delete=True
     )
@@ -83,11 +90,15 @@ class User(UserBase, table=True):
         back_populates="user",
         cascade_delete=False,
     )
+    strikes: list["UserStrike"] = Relationship(
+        back_populates="user", cascade_delete=True
+    )
 
 
 class UserPublic(UserBase):
     id: uuid.UUID
     created_at: datetime | None = None
+    joins_blocked_until: datetime | None = None
 
 
 class UsersPublic(SQLModel):
@@ -365,6 +376,53 @@ class ProviderRatingSummary(SQLModel):
     ratings_count: int = 0
     rating_avg: float | None = None
     estimate_accuracy_rate: float | None = None
+
+
+# --- Strike (FR-12) ---
+
+
+class UserStrike(SQLModel, table=True):
+    """One row per recorded penalty. Read-mostly; never mutated.
+
+    Today the only ``kind`` is ``"no_show"``, but the column is left open so
+    other penalty kinds (e.g. ``"abuse"``) can be added without a migration.
+    """
+
+    __tablename__ = "user_strike"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    user_id: uuid.UUID = Field(
+        foreign_key="user.id", ondelete="CASCADE", index=True
+    )
+    ticket_id: uuid.UUID = Field(
+        foreign_key="queue_entry.id", ondelete="CASCADE", index=True
+    )
+    provider_id: uuid.UUID = Field(
+        foreign_key="provider.id", ondelete="CASCADE", index=True
+    )
+    kind: str = Field(default="no_show", max_length=32)
+    created_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+    user: User | None = Relationship(back_populates="strikes")
+
+
+class UserStrikePublic(SQLModel):
+    id: uuid.UUID
+    ticket_id: uuid.UUID
+    provider_id: uuid.UUID
+    kind: str
+    created_at: datetime | None = None
+
+
+class UserStrikesPublic(SQLModel):
+    data: list[UserStrikePublic]
+    count: int
+    joins_blocked_until: datetime | None = None
+    window_days: int
+    limit: int
 
 
 # --- Shared ---
