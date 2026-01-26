@@ -11,6 +11,10 @@ from werefa.reviews.interface import (
     ticket_router as reviews_ticket_router,
 )
 from werefa.service_items.interface import router as service_items_router
+from werefa.strikes.interface import (
+    admin_router as strikes_admin_router,
+    me_router as strikes_me_router,
+)
 
 api_router = APIRouter()
 api_router.include_router(login_router.router)
@@ -21,6 +25,8 @@ api_router.include_router(service_items_router.router)
 api_router.include_router(queue_router.router)
 api_router.include_router(reviews_ticket_router)
 api_router.include_router(reviews_provider_router)
+api_router.include_router(strikes_me_router)
+api_router.include_router(strikes_admin_router)
 api_router.include_router(realtime_router)
 
 

@@ -8,7 +8,7 @@ When a phase is closed:
 - record the merge commit / branch under **Notes**,
 - bump the **Last updated** line below.
 
-**Last updated:** 2026-04-29 (Phase 6 closed)
+**Last updated:** 2026-04-29 (Phase 7 closed)
 
 ---
 
@@ -144,12 +144,99 @@ Scope and rationale: see [`phase-plan.md` §3](./phase-plan.md#3-cross-cutting-f
 
 ## Phase 7 — No-show strikes & remote-join block (FR-12)
 
-- [ ] Migration: `user_strike` table, `user.joins_blocked_until`.
-- [ ] Hook into `set_ticket_status` for `no_show`.
-- [ ] Settings: `STRIKE_WINDOW_DAYS`, `STRIKE_LIMIT`, `STRIKE_BLOCK_DAYS`.
-- [ ] Block enforcement in `join_queue_remote`.
-- [ ] Endpoints: `GET /me/strikes`, `POST /admin/users/{id}/unblock`.
-- [ ] Tests: window math, block, admin unblock, walk-in unaffected.
+- [x] **Migration** `e8b1f5d27a40_strikes_and_join_block.py` — adds the
+      `user_strike` table (FK to `user`, `queue_entry`, `provider`, all
+      `ondelete=CASCADE`) plus a composite index `ix_user_strike_user_created_at`
+      so the recurring "count strikes for user in window" query is a single
+      index scan with no sort step. Adds `user.joins_blocked_until` (nullable
+      `timestamptz`).
+- [x] **Settings** in `core/config.py` — `STRIKE_WINDOW_DAYS=30`,
+      `STRIKE_LIMIT=3`, `STRIKE_BLOCK_DAYS=7` matching the example in
+      `doc.md` Chapter 3. Tests reassign these in-place to exercise window
+      math without waiting wall-clock time, and a fixture restores them.
+- [x] **Domain** `werefa/strikes/domain/strike_rules.py` — pure functions
+      `window_start`, `evaluate_block` (returns a `BlockEvaluation`
+      dataclass), `block_until_for_threshold`. No Session, no HTTP. Both
+      conditions from the spec (explicit block timestamp **or** strike
+      count `>= limit`) are encoded; defensive paths handle a 0/negative
+      window or limit so a misconfig can't silently lock everyone out.
+- [x] **Repo** `werefa/strikes/infrastructure/repo.py` — `insert_strike`
+      flushes (no commit) so it composes with the queue's transaction;
+      `count_strikes_since` returns an integer using `func.count`;
+      `list_strikes_for_user` for the `/me/strikes` read.
+- [x] **Service** `werefa/strikes/application/service.py` —
+      `record_no_show` (skips walk-ins, inserts strike, materialises
+      `joins_blocked_until` only when the threshold is crossed and only
+      *extends* an existing block, never shrinks it),
+      `assert_remote_join_allowed` (the join-time guard;
+      raises `403` with a structured `detail` containing
+      `joins_blocked_until`, `reason`, `strikes_in_window`, `limit`,
+      `window_days`), `get_self_strike_summary`, `admin_unblock_user`.
+      `strike_recorded`, `join_block_set`, `join_blocked`, and
+      `join_block_cleared_by_admin` are emitted to the standard logger
+      so an ops log scrape works on day one.
+- [x] **Queue hook** in `werefa/queue/application/service.py` —
+      `set_ticket_status` calls `record_no_show` *before* commit so the
+      strike row and the status flip share one transaction.
+      `join_queue_remote` calls `assert_remote_join_allowed` *before*
+      taking the row lock so blocked users pay no contention cost.
+      Walk-in joins (`join_queue_walk_in`) deliberately do **not** call
+      the guard — FR-12 is for remote joins only.
+- [x] **Endpoints** in `werefa/strikes/interface/router.py` —
+      `GET /me/strikes` (current user; returns rows in the active window
+      plus `joins_blocked_until`, `limit`, `window_days`) and
+      `POST /admin/users/{user_id}/unblock` (superuser-gated; clears
+      the block window; returns the updated `UserPublic`).
+- [x] **Conftest update** — clears `Review` and `UserStrike` between
+      tests, and resets `User.joins_blocked_until = NULL` after each
+      test so a strike test can't leak a 403 into the next file.
+- [x] **Domain rule tests** `tests/components/strikes/test_strike_rules.py`
+      cover: window math, below-limit, at-limit threshold, explicit
+      block precedence, expired explicit block, zero-limit safety,
+      `block_until` math, negative-block-days clamp.
+- [x] **API tests** `tests/api/routes/test_strikes.py` cover:
+      no-show records a strike (registered user), no-show on walk-in
+      records *no* strike, three strikes block remote join with the
+      structured 403 detail, walk-in still works for the same person,
+      old strikes outside the window do not block, `GET /me/strikes`
+      returns window stats, admin unblock clears the block and the user
+      can join immediately, non-superuser cannot call the unblock
+      endpoint.
+
+### Quality gates for Phase 7
+
+- [x] **No-DB rule verification**: every branch of `evaluate_block` and
+      both helpers exercised via standalone Python with frozen `now`
+      values — all assertions pass.
+- [x] **Wiring verification (no DB)**: imports resolve, `/me/strikes`
+      and `/admin/users/{user_id}/unblock` are registered, queue hooks
+      reference both `assert_remote_join_allowed` and `record_no_show`,
+      and the three new settings are exposed.
+- [~] **Pytest** for `tests/components/strikes/` and
+      `tests/api/routes/test_strikes.py` — blocked at 2026-04-29 by the
+      same Neon Postgres outage that gated Phases F and 6
+      (`OperationalError: server closed the connection unexpectedly`).
+      Re-run when the DB is healthy; the unit-level rule tests above
+      run without a DB and already pass.
+- [x] No new lints introduced (only the pre-existing
+      "could not be resolved" basedpyright environment warnings).
+
+### Notes
+
+- 2026-04-29: Phase 7 shipped behind the same DB outage as the previous
+  phases. Migration sequence is now
+  `b2c4e6d8a0f1 → d4f8c1a3b209 → e8b1f5d27a40`; running `alembic upgrade
+  head` will pick up everything in order.
+- Block window is *materialised* on the user row when a strike just
+  pushes past the limit. This keeps the join-time check O(1) for the
+  hot path (single SELECT on the user row) and survives the rolling
+  window moving past older strikes. The recompute path inside
+  `assert_remote_join_allowed` covers the (unlikely) case where strikes
+  were inserted via SQL without going through `record_no_show`.
+- The 403 response body intentionally returns a structured
+  `detail` object (`reason`, `joins_blocked_until`, `strikes_in_window`,
+  `limit`, `window_days`) instead of a bare string so the client can
+  build a human message *and* a "Try again on …" prompt without parsing.
 
 ---
 

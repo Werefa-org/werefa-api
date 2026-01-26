@@ -23,8 +23,10 @@ from werefa.shared.models import (  # noqa: E402
     Provider,
     ProviderMembership,
     QueueEntry,
+    Review,
     ServiceItem,
     User,
+    UserStrike,
 )
 
 
@@ -51,6 +53,8 @@ def db() -> Generator[Session, None, None]:
         init_db(session)
         _sync_superuser_password_with_settings(session)
         yield session
+        session.exec(delete(Review))
+        session.exec(delete(UserStrike))
         session.exec(delete(QueueEntry))
         session.exec(delete(ServiceItem))
         session.exec(delete(ProviderMembership))
@@ -77,10 +81,18 @@ def _clear_provider_and_queue_between_tests(db: Session) -> Generator[None, None
     """
 
     def _clear() -> None:
+        db.exec(delete(Review))
+        db.exec(delete(UserStrike))
         db.exec(delete(QueueEntry))
         db.exec(delete(ServiceItem))
         db.exec(delete(ProviderMembership))
         db.exec(delete(Provider))
+        # Reset any block windows that previous tests may have set on the
+        # shared superuser / module-scoped users. Without this, a strike test
+        # leaves the next test's join request 403.
+        from sqlmodel import update  # local import keeps this fixture lean
+
+        db.exec(update(User).values(joins_blocked_until=None))
         db.commit()
         db.expire_all()
 

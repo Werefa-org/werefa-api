@@ -8,6 +8,7 @@ from sqlmodel import Session, col, select
 from werefa.queue.domain import ticket_rules
 from werefa.shared.enums import TicketSource, TicketStatus
 from werefa.shared.models import Provider, QueueEntry, ServiceItem, User, utcnow
+from werefa.strikes.application import service as strikes_service
 
 
 def _is_one_active_user_unique_violation(err: IntegrityError) -> bool:
@@ -79,6 +80,10 @@ def join_queue_remote(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Invalid or missing access code",
             )
+
+    # FR-12: penalty enforcement runs *before* we touch the row lock so a
+    # blocked user pays no contention cost on the service row.
+    strikes_service.assert_remote_join_allowed(session=session, user=user)
 
     assert_single_active_ticket(session, user.id)
 
@@ -221,6 +226,18 @@ def set_ticket_status(
     ticket.completed_at = utcnow()
 
     session.add(ticket)
+
+    # FR-12: a no-show transition also accrues a strike for registered users.
+    # Recorded *before* commit so the strike row and status update share a
+    # single transaction.
+    if new_status == TicketStatus.no_show:
+        svc = session.get(ServiceItem, ticket.service_item_id)
+        provider_id = svc.provider_id if svc is not None else None
+        if provider_id is not None:
+            strikes_service.record_no_show(
+                session=session, ticket=ticket, provider_id=provider_id
+            )
+
     session.commit()
     session.refresh(ticket)
     return ticket
