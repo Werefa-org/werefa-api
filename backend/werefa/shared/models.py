@@ -286,6 +286,13 @@ class QueueEntry(QueueEntryBase, table=True):
         default_factory=utcnow,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    # Stamped when a ticket transitions ``waiting → serving`` so the EWT
+    # service-line WMA can compute real serve duration as
+    # ``completed_at - serving_started_at`` (Phase 8).
+    serving_started_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
     completed_at: datetime | None = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
