@@ -109,6 +109,19 @@ class Settings(BaseSettings):
     STRIKE_LIMIT: int = 3
     STRIKE_BLOCK_DAYS: int = 7
 
+    # Service-weighted moving-average EWT (FR-06, FR-01). The values below
+    # match the algorithm described in `phase-plan.md` §8.2 — fresh samples
+    # weigh more (30-min half life), at least 3 samples are required before
+    # the WMA is trusted (otherwise the configured `avg_duration_minutes`
+    # baseline is used), and we keep at most 50 samples in the rolling
+    # window per service line.
+    EWT_HALF_LIFE_MIN: float = 30.0
+    EWT_MIN_SAMPLES: int = 3
+    EWT_HISTORY_LIMIT: int = 50
+    # When a provider has multiple active service lines, "max" surfaces the
+    # worst case (independent lines), "sum" assumes a single shared server.
+    EWT_PROVIDER_AGGREGATION: Literal["max", "sum"] = "max"
+
     def _check_default_secret(self, var_name: str, value: str | None) -> None:
         if value == "changethis":
             message = (

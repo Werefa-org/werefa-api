@@ -8,7 +8,7 @@ When a phase is closed:
 - record the merge commit / branch under **Notes**,
 - bump the **Last updated** line below.
 
-**Last updated:** 2026-04-29 (Phase 7 closed)
+**Last updated:** 2026-04-29 (Phase 8 closed)
 
 ---
 
@@ -242,11 +242,88 @@ Scope and rationale: see [`phase-plan.md` §3](./phase-plan.md#3-cross-cutting-f
 
 ## Phase 8 — Service-weighted moving-average EWT (FR-06, FR-01)
 
-- [ ] Migration: `queue_entry.serving_started_at`.
-- [ ] Pure module `werefa/queue/application/ewt.py` (WMA).
-- [ ] Replace `provider_queue_hints` heuristic.
-- [ ] Public field renamed/deprecated as planned.
-- [ ] Tests: pure unit + API + cold-start fallback.
+- [x] **Migration** `f1a3c9b6e521_serving_started_at.py` — adds
+      `queue_entry.serving_started_at` (nullable `timestamptz`).
+      No backfill: pre-migration completed tickets have no recorded serve
+      start, so they are conservatively excluded from the WMA. The
+      algorithm transparently falls back to the per-service
+      `avg_duration_minutes` baseline until ≥`EWT_MIN_SAMPLES`
+      post-migration samples accrue.
+- [x] **Settings** in `core/config.py` — `EWT_HALF_LIFE_MIN=30.0`,
+      `EWT_MIN_SAMPLES=3`, `EWT_HISTORY_LIMIT=50`,
+      `EWT_PROVIDER_AGGREGATION='max'` (configurable to `'sum'` for
+      single-server providers).
+- [x] **Pure module** `werefa/queue/application/ewt.py` —
+      `service_line_ewt_minutes` (cold-start fallback, exponential
+      recency weights, history truncation, drops zero/negative
+      durations and clamps future-skew samples) and `provider_ewt_minutes`
+      (max/sum across active service lines, ignores `None` lines).
+      Returns minutes as `float | None`; `round_minutes(...)` produces
+      the integer value the public schema needs.
+- [x] **Queue hook** in `queue/application/service.py` —
+      `call_next_transition` stamps `serving_started_at = utcnow()`
+      whenever a ticket flips `waiting → serving`. The only other path
+      that could reach `serving` (manual `set_ticket_status`) is
+      explicitly disallowed by `validate_manual_status_change`, so this
+      is the single source of truth for serve-start.
+- [x] **Repo** `providers/infrastructure/repo.py` — replaced
+      `provider_queue_hints` (a single-pass heuristic) with two narrower
+      helpers: `provider_active_ticket_counts` (waiting/serving + per-
+      service waiting map) and `list_completed_samples_for_service`
+      (last N completed tickets with both timestamps populated).
+      The split keeps the math in the pure module and lets the service
+      compose them.
+- [x] **Discovery wiring** in `providers/application/service.py` —
+      `_compute_provider_load_and_ewt` invokes the WMA per active
+      service line and aggregates with the configured strategy.
+      Public response shape (`ProviderDiscoveryPublic`) is unchanged;
+      `estimated_wait_minutes` now reflects the new algorithm.
+- [x] **Pure-math tests** `tests/components/queue/test_ewt.py` cover:
+      zero-waiting → 0, cold start → fallback, below-min-samples →
+      fallback, WMA matches manual formula, zero/negative durations
+      dropped, history limit truncates oldest first, future-skew sample
+      clamped, provider aggregation `max`/`sum`/all-`None`, and
+      `round_minutes` edge cases.
+- [x] **API tests** `tests/api/routes/test_provider_discovery_ewt.py`
+      cover: cold-start (3 waiting × 20-min baseline ⇒ 60),
+      post-completion (3 four-minute samples beat a 999-minute
+      baseline so EWT is in the 3–5 min band), zero-waiting yields 0,
+      and a sanity check that `call-next` actually stamps
+      `serving_started_at` on the ticket row.
+- [x] **Existing test compatibility** — `test_discover_provider_returns_load_hints`
+      keeps passing because in the no-completed-samples case the WMA
+      falls back to the same per-service baseline, so 1 waiting × 30
+      avg = 30 minutes is still the right answer.
+
+### Quality gates for Phase 8
+
+- [x] **No-DB rule verification**: WMA, weighting, fallback, truncation,
+      future-skew clamp, and aggregation all exercised via standalone
+      Python — every assertion passes.
+- [x] **Wiring verification (no DB)**: `provider_queue_hints` is gone
+      from the repo; the discovery service calls
+      `service_line_ewt_minutes` and `provider_ewt_minutes` directly;
+      the `QueueEntry` model exposes the new column; `call_next` flips
+      `serving_started_at` to `utcnow()`.
+- [~] **Pytest** — blocked at 2026-04-29 by the persistent Neon Postgres
+      outage that gated Phases F, 6, and 7. The unit-level WMA tests
+      run without a DB and already pass.
+- [x] No new lints introduced (only the pre-existing
+      "could not be resolved" basedpyright environment warnings).
+
+### Notes
+
+- 2026-04-29: Phase 8 shipped. Migration sequence is now
+  `b2c4e6d8a0f1 → d4f8c1a3b209 → e8b1f5d27a40 → f1a3c9b6e521`.
+- The legacy `provider_queue_hints` was deleted outright rather than
+  kept as a shim because it had a single internal caller and no one in
+  the codebase depended on its name. The OpenAPI surface
+  (`estimated_wait_minutes`) is unchanged, so clients see no breaking
+  change — only better numbers.
+- The `EWT_PROVIDER_AGGREGATION` setting (Appendix A of the phase plan,
+  "Provider EWT aggregation: max vs sum") now has a concrete default
+  (`max`) and a flippable knob; switching to `sum` is a one-env-var
+  change, no code rebuild.
 
 ---
 
@@ -339,7 +416,8 @@ Scope and rationale: see [`phase-plan.md` §3](./phase-plan.md#3-cross-cutting-f
 
 ## Open product decisions (from `phase-plan.md` Appendix A)
 
-- [ ] Provider EWT aggregation: max vs sum.
+- [x] Provider EWT aggregation: max vs sum. **Default: `max`**, configurable
+      via `EWT_PROVIDER_AGGREGATION` env var (Phase 8).
 - [ ] Recall window length.
 - [ ] Strike scope: global vs per provider.
 - [ ] Service deletion: soft vs hard.
