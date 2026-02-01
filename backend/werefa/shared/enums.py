@@ -31,3 +31,15 @@ class TicketStatus(str, Enum):
 class TicketSource(str, Enum):
     remote_app = "remote_app"
     kiosk_walk_in = "kiosk_walk_in"
+
+
+class BroadcastSeverity(str, Enum):
+    """Provider broadcast severity tags (FR-08).
+
+    The split keeps the wire format stable while letting clients decorate
+    each message visually (e.g. info banner, warning toast, critical
+    interstitial)."""
+
+    info = "info"
+    warning = "warning"
+    critical = "critical"
