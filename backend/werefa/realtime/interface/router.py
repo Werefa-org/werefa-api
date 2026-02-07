@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import Callable
@@ -12,7 +13,7 @@ from werefa.api.deps import ensure_provider_staff
 from werefa.core.auth_ws import user_id_from_token
 from werefa.core.db import engine
 from werefa.realtime import lifespan
-from werefa.realtime.domain.events import QueueEventV1
+from werefa.realtime.domain.events import BROADCAST_EVENT_TYPE, QueueEventV1
 from werefa.shared.models import QueueEntry, ServiceItem, User
 
 logger = logging.getLogger(__name__)
@@ -25,8 +26,29 @@ async def _close_socket(websocket: WebSocket, code: int, reason: str) -> None:
 
 
 def _message_for_ticket(message: str, ticket_id: uuid.UUID) -> bool:
+    """Decide whether ``message`` should reach a ticket-scoped subscriber.
+
+    Two kinds of payloads share each service-line channel:
+
+    * **Queue events** carry a ``ticket_id`` and are only relevant to the
+      ticket they reference.
+    * **Broadcast events** (``broadcast_v1``) target every active subscriber
+      of the service line; they're always forwarded to every ticket socket
+      attached to that line.
+
+    We peek at the ``type`` field first so a single JSON parse does both
+    decisions and a malformed payload is dropped silently.
+    """
     try:
-        event = QueueEventV1.model_validate_json(message)
+        raw = json.loads(message)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    if raw.get("type") == BROADCAST_EVENT_TYPE:
+        return True
+    try:
+        event = QueueEventV1.model_validate(raw)
     except ValidationError:
         return False
     return event.ticket_id == ticket_id
