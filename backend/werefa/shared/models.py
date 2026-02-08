@@ -1,11 +1,18 @@
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-
 from typing import Literal
 
 from pydantic import EmailStr, model_validator
-from sqlalchemy import Column, DateTime, Index, Numeric, UniqueConstraint, text
+from sqlalchemy import (
+    JSON,
+    Column,
+    DateTime,
+    Index,
+    Numeric,
+    UniqueConstraint,
+    text,
+)
 from sqlmodel import Field, Relationship, SQLModel
 from typing_extensions import Self
 
@@ -84,6 +91,14 @@ class User(UserBase, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    # Ordered list of preferred notification channels (FR-07). New users
+    # start at ``settings.NOTIFICATION_DEFAULT_PREFS``; the migration
+    # backfills NULLs to the same default. JSON keeps the list ordering
+    # without an extra join table.
+    notification_prefs: list[str] | None = Field(
+        default=None,
+        sa_column=Column(JSON, nullable=True),
+    )
     provider_memberships: list["ProviderMembership"] = Relationship(
         back_populates="user", cascade_delete=True
     )
@@ -94,12 +109,16 @@ class User(UserBase, table=True):
     strikes: list["UserStrike"] = Relationship(
         back_populates="user", cascade_delete=True
     )
+    notifications: list["Notification"] = Relationship(
+        back_populates="user", cascade_delete=True
+    )
 
 
 class UserPublic(UserBase):
     id: uuid.UUID
     created_at: datetime | None = None
     joins_blocked_until: datetime | None = None
+    notification_prefs: list[str] | None = None
 
 
 class UsersPublic(SQLModel):
@@ -298,6 +317,11 @@ class QueueEntry(QueueEntryBase, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    # Tracks the last position at which we sent a smart pre-alert (FR-07).
+    # Used to suppress duplicates: an alert is only emitted when the
+    # ticket reaches a trigger position *and* this column doesn't already
+    # match. ``None`` means no alerts have been sent for this ticket.
+    last_alert_position: int | None = Field(default=None, ge=1)
 
     service_item: ServiceItem | None = Relationship(back_populates="queue_entries")
     user: User | None = Relationship(back_populates="queue_entries")
@@ -499,6 +523,74 @@ class BroadcastPublic(BroadcastMessageBase):
 class BroadcastsPublic(SQLModel):
     data: list[BroadcastPublic]
     count: int
+
+
+# --- Notifications (FR-07) ---
+
+
+class NotificationBase(SQLModel):
+    kind: str = Field(max_length=32)
+    body: str = Field(min_length=1, max_length=500)
+    channel: str = Field(max_length=16)
+    status: str = Field(max_length=16)
+
+
+class Notification(NotificationBase, table=True):
+    """Append-only ledger of every alert dispatched (FR-07).
+
+    One row per (user, ticket, position trigger) is emitted regardless of
+    delivery success. ``status`` records what happened on the chosen
+    channel; ``channel`` reflects the *first deliverable* preference at
+    dispatch time (or ``logger`` if everything else failed, since
+    ``LoggerNotifier`` always succeeds).
+    """
+
+    __tablename__ = "notification"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    user_id: uuid.UUID = Field(
+        foreign_key="user.id", ondelete="CASCADE", index=True
+    )
+    ticket_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="queue_entry.id",
+        ondelete="SET NULL",
+        index=True,
+    )
+    position: int | None = Field(default=None, ge=1)
+    created_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+    user: User | None = Relationship(back_populates="notifications")
+
+
+class NotificationPublic(NotificationBase):
+    id: uuid.UUID
+    ticket_id: uuid.UUID | None = None
+    position: int | None = None
+    created_at: datetime | None = None
+
+
+class NotificationsPublic(SQLModel):
+    data: list[NotificationPublic]
+    count: int
+
+
+class NotificationPrefsUpdate(SQLModel):
+    """Body of ``PATCH /users/me/notifications``."""
+
+    notification_prefs: list[str] = Field(
+        description=(
+            "Ordered list of channel keys (e.g. "
+            "[\"websocket\",\"email\"]); the first deliverable channel "
+            "wins per dispatch. Channels not recognised by the server "
+            "are rejected with 400."
+        ),
+        min_length=1,
+        max_length=8,
+    )
 
 
 # --- Shared ---
