@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from sqlmodel import col, select
 
 from werefa.api.deps import CurrentUser, SessionDep, ensure_provider_staff
+from werefa.notifications.application import service as notifications_service
 from werefa.queue.application import service as queue_service
 from werefa.realtime.notify import notify_queue_subscribers
 from werefa.shared.enums import TicketStatus
@@ -63,6 +64,9 @@ def join_queue(
     notify_queue_subscribers(
         session, service_item_id, ticket=ticket, reason="join"
     )
+    notifications_service.evaluate_smart_alerts_for_service_line(
+        session, service_item_id=service_item_id
+    )
     return QueueEntryPublic.model_validate(ticket)
 
 
@@ -87,6 +91,9 @@ def register_walk_in(
     )
     notify_queue_subscribers(
         session, service_item_id, ticket=ticket, reason="walk_in"
+    )
+    notifications_service.evaluate_smart_alerts_for_service_line(
+        session, service_item_id=service_item_id
     )
     return QueueEntryPublic.model_validate(ticket)
 
@@ -133,6 +140,9 @@ def call_next(
         )
     if current is None and nxt is None:
         notify_queue_subscribers(session, service_item_id, reason="call_next")
+    notifications_service.evaluate_smart_alerts_for_service_line(
+        session, service_item_id=service_item_id
+    )
     if nxt is None:
         return None
     return QueueEntryPublic.model_validate(nxt)
@@ -161,5 +171,8 @@ def update_ticket_status(
     )
     notify_queue_subscribers(
         session, service_item_id, ticket=row, reason="status_update"
+    )
+    notifications_service.evaluate_smart_alerts_for_service_line(
+        session, service_item_id=service_item_id
     )
     return QueueEntryPublic.model_validate(row)

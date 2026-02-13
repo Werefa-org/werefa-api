@@ -8,7 +8,7 @@ When a phase is closed:
 - record the merge commit / branch under **Notes**,
 - bump the **Last updated** line below.
 
-**Last updated:** 2026-04-29 (Phase 8 closed)
+**Last updated:** 2026-04-29 (Phase 9 closed)
 
 ---
 
@@ -329,10 +329,108 @@ Scope and rationale: see [`phase-plan.md` §3](./phase-plan.md#3-cross-cutting-f
 
 ## Phase 9 — Provider broadcast (FR-08, UC-11)
 
-- [ ] Migration: `broadcast_message`.
-- [ ] Endpoints: `POST /providers/{id}/broadcasts`, `GET /providers/{id}/broadcasts`.
-- [ ] Realtime: `BroadcastEventV1`.
-- [ ] Tests: staff-only auth, idempotency, fan-out.
+- [x] **Migration** `aa92d4f80c17_broadcast_message.py` — adds the
+      `broadcast_message` table with FKs to `provider`, `service_item`
+      (nullable), and `user` (author), all `ondelete=CASCADE`. Severity
+      column carries a `CHECK (severity IN ('info','warning','critical'))`
+      so the database is the final guardrail. Idempotency is scoped per
+      provider via the unique constraint
+      `uq_broadcast_provider_idem_key (provider_id, idempotency_key)`,
+      relying on Postgres's "NULLs distinct" semantics so requests
+      without a key are never deduplicated. A composite
+      `ix_broadcast_provider_created_at` removes the sort step from
+      `GET /providers/{id}/broadcasts?since=...`.
+- [x] **Enum** `BroadcastSeverity` (`info`/`warning`/`critical`) in
+      `werefa/shared/enums.py`.
+- [x] **Models** in `werefa/shared/models.py` —
+      `BroadcastMessageBase`, `BroadcastCreate`, `BroadcastMessage`
+      (table), `BroadcastPublic`, `BroadcastsPublic`.
+- [x] **Realtime event** `BroadcastEventV1` in
+      `werefa/realtime/domain/events.py` with `type="broadcast_v1"`,
+      `Literal` severity enforcement, and ISO timestamp serialiser.
+      The new module-level constant `BROADCAST_EVENT_TYPE` is the
+      single source of truth used by both the publisher and the
+      ticket-stream filter.
+- [x] **Repo** `werefa/broadcasts/infrastructure/repo.py` —
+      `get_by_idempotency_key`, `list_for_provider` (with `since`
+      cursor + limit, descending order on `created_at`).
+- [x] **Service** `werefa/broadcasts/application/service.py` —
+      `create_broadcast` validates severity at the application layer
+      (so the 400 surface is consistent), checks the idempotency key
+      *before* insert, falls back to the same lookup if the unique
+      constraint resolves a concurrent-replay race, and returns
+      `(record, created: bool)` so the router can flip the status code
+      between `201` and `200`. Logs `broadcast_created` on success.
+- [x] **Realtime fan-out** `notify_broadcast_subscribers` in
+      `werefa/realtime/notify.py` — best-effort, never blocks the
+      caller, never raises (failures are logged). When a broadcast
+      targets a single service line it fans out to that channel only;
+      when ``service_item_id`` is null, it iterates every active
+      service line of the provider so subscribers always receive
+      events on a channel they're already attached to.
+- [x] **Ticket-stream filter** in `werefa/realtime/interface/router.py`
+      — `_message_for_ticket` now peeks at `type` first; broadcast
+      events are *always* forwarded to ticket-scoped sockets, queue
+      events still match by `ticket_id`, and malformed payloads or
+      unknown event types are silently dropped.
+- [x] **Router** `werefa/broadcasts/interface/router.py` —
+      `POST /providers/{provider_id}/broadcasts` (status `201` on
+      create, `200` on idempotent replay) and
+      `GET /providers/{provider_id}/broadcasts?since=...&limit=...`,
+      both gated by `ensure_provider_staff` so the message ledger
+      doesn't leak operational state to customers.
+- [x] **Wiring** `werefa/api/main.py` includes the new router under
+      the existing `/providers` prefix.
+- [x] **Conftest update** — clears `BroadcastMessage` between tests
+      (and on session teardown) so a stale message from one test file
+      never reaches the next.
+- [x] **Unit tests** `tests/components/realtime/test_broadcast_events.py`
+      cover: schema round-trip with ISO timestamp, rejection of
+      unknown severity, body-length enforcement, the broadcast-always-
+      forwards rule for the ticket filter, queue-event ticket-id
+      match/mismatch, malformed JSON / non-object payloads, and an
+      unknown `type` is dropped.
+- [x] **API tests** `tests/api/routes/test_broadcasts.py` cover:
+      staff posts a provider-wide broadcast, staff posts a service-
+      scoped broadcast, severity rejection (400), empty-body
+      rejection (422), service from a different provider rejected
+      (404), idempotency replay (201 then 200, single row in DB),
+      customer cannot post (403), customer cannot list (403), and
+      list returns recent-first with a `since` filter.
+
+### Quality gates for Phase 9
+
+- [x] **No-DB schema verification**: `BroadcastEventV1` round-trips,
+      severity Literal rejects junk, body length is enforced, and the
+      ticket-stream filter forwards broadcasts while still matching
+      queue events by ticket id.
+- [x] **Wiring verification (no DB)**: imports resolve, the new
+      `/providers/{provider_id}/broadcasts` route is registered, the
+      conftest clears `BroadcastMessage`, and the service signature
+      returns `(BroadcastMessage, bool)` for the 201/200 split.
+- [~] **Pytest** for `tests/components/realtime/` and
+      `tests/api/routes/test_broadcasts.py` — blocked at 2026-04-29 by
+      the same Neon Postgres outage that gated previous phases. The
+      schema/filter tests run without a DB and pass.
+- [x] No new lints introduced (only the pre-existing
+      "could not be resolved" basedpyright environment warnings).
+
+### Notes
+
+- 2026-04-29: Phase 9 shipped. Migration sequence is now
+  `b2c4e6d8a0f1 → d4f8c1a3b209 → e8b1f5d27a40 → f1a3c9b6e521 →
+  aa92d4f80c17`.
+- The realtime fan-out is *best-effort* by design: a publish failure
+  never rolls back the persisted broadcast, so the message is always
+  reachable through `GET /providers/{id}/broadcasts` even if a Redis
+  bridge or coordinator hiccup eats one realtime delivery. Phase 10
+  will layer push/email on top of the same persisted ledger.
+- Idempotency is keyed on `(provider_id, idempotency_key)` so two
+  unrelated providers can use the same client-generated string without
+  colliding. The replay path returns the original record's body
+  verbatim (including the stored `severity`) — the second request's
+  fields are *not* used to update the first, which mirrors how most
+  payment APIs handle Idempotency-Key.
 
 ---
 
@@ -386,33 +484,6 @@ Scope and rationale: see [`phase-plan.md` §3](./phase-plan.md#3-cross-cutting-f
 
 ---
 
-## Phase 15 — Offline kiosk batch sync (NFR-02, Scenario D)
-
-- [ ] `idempotency_keys` table.
-- [ ] `POST /service-items/{sid}/walk-ins/batch`.
-- [ ] Tests: replay safety, ordering rules.
-
----
-
-## Phase 16 — Auth depth (US-SYS-00)
-
-- [ ] `login_attempt` table; lockout window/duration.
-- [ ] Login response includes `home` hint.
-- [ ] OTP behind feature flag (`AUTH_OTP_ENABLED`).
-- [ ] Tests: lockout boundary, OTP happy path with flag.
-
----
-
-## Phase 17 — Hardening, performance, security, ops (NFR-01, 03, 04, 05)
-
-- [ ] Indexes audit.
-- [ ] Rate limits on login + write endpoints.
-- [ ] Structured logging baseline.
-- [ ] `/health/live`, `/health/ready` endpoints.
-- [ ] Load tests reproducible (k6 or locust).
-- [ ] `ops/readiness.md` checklist.
-
----
 
 ## Open product decisions (from `phase-plan.md` Appendix A)
 

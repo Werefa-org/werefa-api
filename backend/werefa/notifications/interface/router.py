@@ -1,0 +1,44 @@
+"""HTTP surface for smart pre-alerts (FR-07)."""
+
+from typing import Any
+
+from fastapi import APIRouter, Query
+
+from werefa.api.deps import CurrentUser, SessionDep
+from werefa.notifications.application import service as notifications_service
+from werefa.shared.models import (
+    NotificationPrefsUpdate,
+    NotificationPublic,
+    NotificationsPublic,
+    UserPublic,
+)
+
+router = APIRouter(prefix="/me", tags=["notifications"])
+prefs_router = APIRouter(prefix="/users", tags=["notifications"])
+
+
+@router.get("/notifications", response_model=NotificationsPublic)
+def list_my_notifications(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> Any:
+    rows, total = notifications_service.list_user_notifications(
+        session, user=current_user, limit=limit, offset=offset
+    )
+    data = [NotificationPublic.model_validate(r) for r in rows]
+    return NotificationsPublic(data=data, count=total)
+
+
+@prefs_router.patch("/me/notifications", response_model=UserPublic)
+def update_my_notification_prefs(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    body: NotificationPrefsUpdate,
+) -> Any:
+    return notifications_service.update_prefs(
+        session, user=current_user, body=body
+    )
