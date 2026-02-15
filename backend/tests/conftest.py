@@ -21,6 +21,7 @@ from werefa.main import app  # noqa: E402
 from werefa.shared.enums import UserType  # noqa: E402
 from werefa.shared.models import (  # noqa: E402
     BroadcastMessage,
+    Notification,
     Provider,
     ProviderMembership,
     QueueEntry,
@@ -54,6 +55,7 @@ def db() -> Generator[Session, None, None]:
         init_db(session)
         _sync_superuser_password_with_settings(session)
         yield session
+        session.exec(delete(Notification))
         session.exec(delete(BroadcastMessage))
         session.exec(delete(Review))
         session.exec(delete(UserStrike))
@@ -83,6 +85,7 @@ def _clear_provider_and_queue_between_tests(db: Session) -> Generator[None, None
     """
 
     def _clear() -> None:
+        db.exec(delete(Notification))
         db.exec(delete(BroadcastMessage))
         db.exec(delete(Review))
         db.exec(delete(UserStrike))
@@ -90,12 +93,18 @@ def _clear_provider_and_queue_between_tests(db: Session) -> Generator[None, None
         db.exec(delete(ServiceItem))
         db.exec(delete(ProviderMembership))
         db.exec(delete(Provider))
-        # Reset any block windows that previous tests may have set on the
-        # shared superuser / module-scoped users. Without this, a strike test
-        # leaves the next test's join request 403.
+        # Reset any block windows + saved channel prefs that previous tests
+        # may have set on the shared superuser / module-scoped users.
+        # Without this, a strike test leaves the next test's join request
+        # 403, and a prefs test could change channel resolution mid-suite.
         from sqlmodel import update  # local import keeps this fixture lean
 
-        db.exec(update(User).values(joins_blocked_until=None))
+        db.exec(
+            update(User).values(
+                joins_blocked_until=None,
+                notification_prefs=None,
+            )
+        )
         db.commit()
         db.expire_all()
 
