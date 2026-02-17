@@ -33,10 +33,24 @@ def list_for_provider(
     provider_id: uuid.UUID,
     since: datetime | None,
     limit: int,
+    service_item_ids: list[uuid.UUID] | None = None,
 ) -> Sequence[BroadcastMessage]:
+    """List broadcast rows for a provider, newest first.
+
+    ``service_item_ids`` constrains the query to provider-wide
+    broadcasts (``service_item_id IS NULL``) plus broadcasts targeted at
+    one of the supplied lines — used for the customer-facing read in
+    CRIT-5 so a customer only sees broadcasts that actually fan out to
+    their queue.
+    """
     statement = select(BroadcastMessage).where(
         BroadcastMessage.provider_id == provider_id
     )
+    if service_item_ids is not None:
+        statement = statement.where(
+            col(BroadcastMessage.service_item_id).is_(None)
+            | col(BroadcastMessage.service_item_id).in_(service_item_ids)
+        )
     if since is not None:
         statement = statement.where(col(BroadcastMessage.created_at) >= since)
     statement = (

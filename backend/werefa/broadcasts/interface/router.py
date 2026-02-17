@@ -12,6 +12,7 @@ from werefa.api.deps import (
     ensure_provider_staff,
 )
 from werefa.broadcasts.application import service as broadcasts_service
+from werefa.providers.infrastructure import repo as provider_repo
 from werefa.shared.models import (
     BroadcastCreate,
     BroadcastPublic,
@@ -70,17 +71,50 @@ def list_broadcasts(
     ),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> Any:
-    # Reads are restricted to staff/owner because the message is
-    # operational ("doctor running 20 min late") and could leak business
-    # state if exposed to anyone.
-    try:
-        ensure_provider_staff(
-            session=session, current_user=current_user, provider_id=provider_id
+    """List broadcasts for a provider.
+
+    * **Staff / owner / admin** receive every broadcast for the provider
+      (operational messages targeted at any service line).
+    * **Customers** with an active (waiting/serving) ticket on the
+      provider receive only the broadcasts that fan out to *their*
+      lines — both provider-wide messages and service-scoped ones for
+      the lines they're on. This is the REST counterpart to the
+      ``broadcast_v1`` events on the ticket WebSocket so a brief drop
+      doesn't lose them messages (CRIT-5).
+    * **Anyone else** gets 403.
+    """
+    is_staff = current_user.is_superuser or (
+        provider_repo.get_membership(
+            session=session, provider_id=provider_id, user_id=current_user.id
         )
-    except HTTPException:
-        raise
+        is not None
+    )
+    if is_staff:
+        rows = broadcasts_service.list_for_provider(
+            session, provider_id=provider_id, since=since, limit=limit
+        )
+        return BroadcastsPublic(
+            data=[BroadcastPublic.model_validate(r) for r in rows],
+            count=len(rows),
+        )
+
+    service_item_ids = broadcasts_service.active_service_item_ids_for_user(
+        session, provider_id=provider_id, user=current_user
+    )
+    if not service_item_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Broadcasts are visible to staff or to customers with an "
+                "active ticket on this provider."
+            ),
+        )
     rows = broadcasts_service.list_for_provider(
-        session, provider_id=provider_id, since=since, limit=limit
+        session,
+        provider_id=provider_id,
+        since=since,
+        limit=limit,
+        service_item_ids=service_item_ids,
     )
     return BroadcastsPublic(
         data=[BroadcastPublic.model_validate(r) for r in rows], count=len(rows)
