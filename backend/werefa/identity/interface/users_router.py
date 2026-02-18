@@ -42,6 +42,20 @@ def update_user_me(
     return identity_service.update_user_me(session, current_user, user_in)
 
 
+@router.post("/me/become-provider", response_model=UserPublic)
+def become_provider(
+    *, session: SessionDep, current_user: CurrentUser
+) -> Any:
+    """Self-service ``customer → provider`` upgrade (HIGH-4).
+
+    Returns the same payload as ``GET /users/me`` so a client can
+    diff the ``user_type`` field locally without an extra round trip.
+    The provider record this user creates afterwards still goes
+    through the admin verification step (UC-10).
+    """
+    return identity_service.become_provider(session, current_user)
+
+
 @router.patch("/me/password", response_model=Message)
 def update_password_me(
     *, session: SessionDep, body: UpdatePassword, current_user: CurrentUser

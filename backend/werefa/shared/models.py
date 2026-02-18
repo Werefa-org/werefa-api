@@ -66,10 +66,16 @@ class UserUpdate(UserBase):
 
 
 class UserUpdateMe(SQLModel):
+    """Self-edit payload for ``PATCH /users/me``.
+
+    Deliberately *does not* include ``user_type`` — role upgrades go
+    through the dedicated ``POST /users/me/become-provider`` endpoint
+    so identity changes don't ride along with profile edits (HIGH-4).
+    """
+
     full_name: str | None = Field(default=None, max_length=255)
     email: EmailStr | None = Field(default=None, max_length=255)
     phone_number: str | None = Field(default=None, max_length=20)
-    user_type: Literal["provider"] | None = None
 
 
 class UpdatePassword(SQLModel):
@@ -141,11 +147,11 @@ class ProviderBase(SQLModel):
     latitude: float | None = None
     longitude: float | None = None
     is_private: bool = False
-    access_code: str | None = Field(default=None, max_length=6)
 
 
 class ProviderCreate(ProviderBase):
     owner_user_id: uuid.UUID | None = None
+    access_code: str | None = Field(default=None, max_length=6)
 
 
 class ProviderUpdate(SQLModel):
@@ -161,6 +167,11 @@ class ProviderUpdate(SQLModel):
 
 class Provider(ProviderBase, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    # Stored alongside the rest of the provider row but intentionally
+    # *not* re-exported on ``ProviderPublic``. Owners rotate it via
+    # ``ProviderUpdate``; readers must request it through the staff-only
+    # endpoint introduced in this pass.
+    access_code: str | None = Field(default=None, max_length=6)
     created_at: datetime | None = Field(
         default_factory=utcnow,
         sa_column=Column(DateTime(timezone=True), nullable=True),
@@ -186,6 +197,13 @@ class ProviderPublic(ProviderBase):
     created_at: datetime | None = None
     ratings_count: int = 0
     rating_avg: float | None = None
+
+
+class ProviderStaffPublic(ProviderPublic):
+    """Staff/owner view: includes the rotating access code so staff can
+    share it. Returned by ``GET /providers/{id}/access-code``."""
+
+    access_code: str | None = None
 
 
 class ProviderDiscoveryPublic(ProviderPublic):

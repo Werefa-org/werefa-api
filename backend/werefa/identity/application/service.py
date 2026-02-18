@@ -8,9 +8,10 @@ from werefa.core import security
 from werefa.core.config import settings
 from werefa.core.security import get_password_hash, verify_password
 from werefa.identity.infrastructure import repo as identity_repo
-from werefa.shared.enums import UserType
+from werefa.shared.enums import TicketStatus, UserType
 from werefa.shared.models import (
     Message,
+    QueueEntry,
     Token,
     UpdatePassword,
     User,
@@ -72,6 +73,10 @@ def create_user(session: Session, user_in: UserCreate) -> User:
 
 
 def update_user_me(session: Session, current_user: User, user_in: UserUpdateMe) -> User:
+    """Profile edit only — role/identity changes go through dedicated
+    endpoints so a `PATCH /users/me` body can never silently elevate
+    the caller (HIGH-4)."""
+
     if user_in.email:
         existing_user = identity_repo.get_user_by_email(
             session=session, email=user_in.email
@@ -81,24 +86,34 @@ def update_user_me(session: Session, current_user: User, user_in: UserUpdateMe) 
                 status_code=409, detail="User with this email already exists"
             )
     data = user_in.model_dump(exclude_unset=True)
-    if "user_type" in data:
-        if data["user_type"] != "provider":
-            raise HTTPException(
-                status_code=400,
-                detail="Only upgrading to provider is supported from this endpoint",
-            )
-        if current_user.is_superuser:
-            raise HTTPException(
-                status_code=400,
-                detail="Administrator accounts cannot change type here",
-            )
-        if current_user.user_type != UserType.customer.value:
-            raise HTTPException(
-                status_code=400,
-                detail="Only customer accounts can switch to provider this way",
-            )
-        data["user_type"] = UserType.provider.value
     current_user.sqlmodel_update(data)
+    session.add(current_user)
+    session.commit()
+    session.refresh(current_user)
+    return current_user
+
+
+def become_provider(session: Session, current_user: User) -> User:
+    """Self-service upgrade from ``customer`` → ``provider`` (HIGH-4).
+
+    The provider record they create afterwards still goes through the
+    admin verification flow, so this endpoint by itself doesn't grant
+    any public-facing presence — it just unlocks ``POST /providers/``
+    so the user can register their business for review.
+    """
+    if current_user.is_superuser:
+        raise HTTPException(
+            status_code=400,
+            detail="Administrator accounts already have provider privileges",
+        )
+    if current_user.user_type == UserType.provider.value:
+        return current_user
+    if current_user.user_type != UserType.customer.value:
+        raise HTTPException(
+            status_code=400,
+            detail="Only customer accounts can upgrade to provider",
+        )
+    current_user.user_type = UserType.provider.value
     session.add(current_user)
     session.commit()
     session.refresh(current_user)
@@ -126,6 +141,26 @@ def delete_user_me(session: Session, current_user: User) -> Message:
         raise HTTPException(
             status_code=403, detail="Super users are not allowed to delete themselves"
         )
+    # MED-4: refuse self-delete while active tickets exist; otherwise
+    # the FK ``ON DELETE SET NULL`` would convert them into phantom
+    # walk-ins that no one can clean up.
+    active = session.exec(
+        select(QueueEntry.id)
+        .where(QueueEntry.user_id == current_user.id)
+        .where(
+            col(QueueEntry.status).in_(
+                (TicketStatus.waiting.value, TicketStatus.serving.value)
+            )
+        )
+    ).first()
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "You still have an active queue ticket. Cancel or finish "
+                "it before closing your account."
+            ),
+        )
     session.delete(current_user)
     session.commit()
     return Message(message="User deleted successfully")
@@ -144,14 +179,17 @@ def register_user(session: Session, user_in: UserRegister) -> User:
 
 
 def read_user_by_id(session: Session, current_user: User, user_id: uuid.UUID) -> User:
-    user = session.get(User, user_id)
-    if user == current_user:
-        return user
+    # MED-7: handle the deleted-self edge first — a user looking up
+    # their own (just-deleted) id otherwise falls into the non-super
+    # 403 branch instead of the 404 they expect.
+    if user_id == current_user.id:
+        return current_user
     if not current_user.is_superuser:
         raise HTTPException(
             status_code=403,
             detail="The user doesn't have enough privileges",
         )
+    user = session.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     return user
@@ -175,8 +213,22 @@ def update_user(session: Session, user_id: uuid.UUID, user_in: UserUpdate) -> Us
     updated_user = identity_repo.update_user(
         session=session, db_user=db_user, user_in=user_in
     )
+    # HIGH-3: keep ``is_superuser`` and ``user_type`` in lock-step in
+    # both directions. Promotion sets user_type=admin; demotion drops
+    # it back to ``customer`` (an admin who's no longer a superuser
+    # is not a regular customer either, but ``customer`` is the only
+    # safe default — the operator can re-issue ``provider`` afterwards
+    # if they intended a sideways move).
+    desired_type: str | None = None
     if updated_user.is_superuser and updated_user.user_type != UserType.admin.value:
-        updated_user.user_type = UserType.admin.value
+        desired_type = UserType.admin.value
+    elif (
+        not updated_user.is_superuser
+        and updated_user.user_type == UserType.admin.value
+    ):
+        desired_type = UserType.customer.value
+    if desired_type is not None:
+        updated_user.user_type = desired_type
         session.add(updated_user)
         session.commit()
         session.refresh(updated_user)
