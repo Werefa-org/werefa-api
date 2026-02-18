@@ -4,7 +4,7 @@ from math import asin, cos, radians, sin, sqrt
 from sqlmodel import Session, col, select
 
 from werefa.queue.application.ewt import CompletedSample
-from werefa.shared.enums import MembershipRole, TicketStatus
+from werefa.shared.enums import MembershipRole, TicketStatus, VerificationStatus
 from werefa.shared.models import (
     Provider,
     ProviderCreate,
@@ -14,9 +14,16 @@ from werefa.shared.models import (
 )
 
 
-def create_provider(*, session: Session, body: ProviderCreate) -> Provider:
+def create_provider(
+    *, session: Session, body: ProviderCreate, auto_verify: bool = False
+) -> Provider:
     owner_id = body.owner_user_id
     data = body.model_dump(exclude={"owner_user_id"})
+    if auto_verify:
+        # Admin-initiated creates skip the manual KYC gate; the column
+        # is set explicitly so the rest of the codebase doesn't need to
+        # special-case "admin made this".
+        data["verification_status"] = VerificationStatus.verified.value
     p = Provider.model_validate(data)
     session.add(p)
     session.commit()
@@ -75,6 +82,7 @@ def list_discoverable_providers(
     include_private: bool,
     only_open: bool,
     include_paused: bool,
+    include_unverified: bool,
     limit: int,
     offset: int,
 ) -> list[tuple[Provider, int]]:
@@ -85,6 +93,12 @@ def list_discoverable_providers(
     )
     if not include_private:
         statement = statement.where(col(Provider.is_private).is_(False))
+    # UC-10: only verified providers are publicly discoverable. Admins
+    # opt in to the rejected/pending pool via ``include_unverified``.
+    if not include_unverified:
+        statement = statement.where(
+            col(Provider.verification_status) == VerificationStatus.verified.value
+        )
     if query:
         q = f"%{query.lower()}%"
         statement = statement.where(

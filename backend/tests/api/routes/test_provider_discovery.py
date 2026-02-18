@@ -133,8 +133,12 @@ def test_discover_providers_can_include_private_paused_and_radius_filter(
         longitude=38.7411,
         is_open=False,
     )
+    # ``include_private`` is admin-only (CRIT-2); calling discover with
+    # the superuser token unlocks the gate. An unauthenticated caller
+    # would silently get the public-safe result regardless of the query.
     r = client.get(
         f"{settings.API_V1_STR}/providers/discover",
+        headers=superuser_token_headers,
         params={
             "latitude": 9.0,
             "longitude": 38.74,
