@@ -148,6 +148,42 @@ def call_next(
     return QueueEntryPublic.model_validate(nxt)
 
 
+@router.delete(
+    "/{service_item_id}/tickets/{ticket_id}",
+    response_model=QueueEntryPublic,
+)
+def cancel_my_ticket(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    ticket_id: uuid.UUID,
+) -> Any:
+    """Customer leaves their own queue spot (CRIT-4).
+
+    Owner-only — staff use the PATCH endpoint to mark no-show or
+    complete. No strike is recorded for a voluntary cancel.
+    """
+    _service_or_404(session, service_item_id)
+    ticket = queue_service.cancel_my_ticket(
+        session, ticket_id=ticket_id, user=current_user
+    )
+    if ticket.service_item_id != service_item_id:
+        # Defensive: should be impossible but keeps the URL contract
+        # honest if a client mismatched ids.
+        raise HTTPException(
+            status_code=404,
+            detail="Ticket does not belong to this service line",
+        )
+    notify_queue_subscribers(
+        session, service_item_id, ticket=ticket, reason="cancelled_by_user"
+    )
+    notifications_service.evaluate_smart_alerts_for_service_line(
+        session, service_item_id=service_item_id
+    )
+    return QueueEntryPublic.model_validate(ticket)
+
+
 @router.patch(
     "/{service_item_id}/tickets/{ticket_id}/status",
     response_model=QueueEntryPublic,
