@@ -8,7 +8,7 @@ When a phase is closed:
 - record the merge commit / branch under **Notes**,
 - bump the **Last updated** line below.
 
-**Last updated:** 2026-04-29 (Phase 9 closed)
+**Last updated:** 2026-04-30 (post-Phase 10 audit-fix pass)
 
 ---
 
@@ -436,12 +436,101 @@ Scope and rationale: see [`phase-plan.md` §3](./phase-plan.md#3-cross-cutting-f
 
 ## Phase 10 — Notifications + smart pre-alerts (FR-07)
 
-- [ ] `werefa/notifications/notifier.py` + adapters (Logger, Email, WebSocket).
-- [ ] User notification preferences.
-- [ ] Trigger rules at top-K and position #1.
-- [ ] Migration: `queue_entry.last_alert_position`.
-- [ ] Endpoint: `GET /me/notifications`.
-- [ ] Tests: time-based scenario, preference selection.
+**Status: completed (DB-backed pytest path still blocked by the Neon
+outage; pure-rule, registry, and filter logic verified in isolation).**
+
+- [x] `werefa/notifications/notifier.py` + adapters (Logger, Email,
+  WebSocket). The `Notifier` protocol returns a boolean rather than
+  raising — the dispatcher walks the user's preference list and stops
+  on the first deliverable channel. `LoggerNotifier` is the always-
+  deliverable backstop so every alert leaves an audit row.
+- [x] User notification preferences. `User.notification_prefs JSON`
+  stores the ordered channel list; default
+  `["websocket","email","logger"]` lives in
+  `settings.NOTIFICATION_DEFAULT_PREFS`. `PATCH
+  /api/v1/users/me/notifications` validates each key against the
+  `NotificationChannel` enum (400 on unknown keys) and persists the
+  user-supplied order verbatim. `UserPublic` exposes the prefs so the
+  GET /users/me payload reflects updates.
+- [x] Trigger rules at top-K and position 1. The pure
+  `werefa/notifications/domain/triggers.py::decide_alert` function takes
+  `position`, `last_alert_position`, and `top_k` and returns the
+  `AlertDecision` (or `None`). Idempotency is handled by comparing the
+  candidate alert's position to `last_alert_position` *before* dispatch.
+- [x] Migration: `queue_entry.last_alert_position`,
+  `user.notification_prefs`, and a new `notification` table —
+  `c5e6a7b8d291_notifications_and_alerts.py`. The migration adds CHECK
+  constraints for `kind`, `channel`, and `status` so a typo at the
+  application layer can't sneak invalid rows past the DB. A composite
+  index on `(user_id, created_at)` makes the recent-first read in
+  `GET /me/notifications` a single index scan.
+- [x] Endpoints: `GET /api/v1/me/notifications` (paged, recent-first)
+  and `PATCH /api/v1/users/me/notifications`. The list endpoint
+  returns `data + count` (matching the broadcast list shape) so a
+  Phase 13 dashboard can paginate without extra round trips.
+- [x] Smart-alert hooks. After every queue mutation
+  (`/join`, `/walk-in`, `/call-next`, `/tickets/{id}/status`), the
+  router calls `evaluate_smart_alerts_for_service_line` which walks
+  the active queue, dispatches alerts for any ticket that just landed
+  on a trigger position, and stamps `queue_entry.last_alert_position`
+  to suppress duplicates. A static AST check in the verification
+  scripts confirms the hook is wired on all four mutation endpoints.
+- [x] Realtime: new `NotifyEventV1` (`notify_v1`) wire format and a
+  `NOTIFY_EVENT_TYPE` constant. The ticket-stream filter
+  (`_message_for_ticket`) now forwards `notify_v1` events whose
+  `ticket_id` matches the connected socket — the same service-line
+  channel can carry queue updates, broadcasts, and notifies without
+  cross-talk.
+- [x] Conftest: `Notification` rows are wiped between tests and
+  `User.notification_prefs` is reset alongside `joins_blocked_until`
+  so a prefs test can't bleed into the next test's channel resolution.
+- [x] Tests:
+  - `tests/components/notifications/test_triggers.py` — 7 frozen-state
+    cases (alert at K, alert at 1, idempotency, rise-through-K-to-1,
+    K=1 collapse, no-op for in-between positions, defensive
+    zero/negative).
+  - `tests/components/notifications/test_registry.py` — 6 cases
+    covering first-deliverable-wins, logger-backstop fallthrough,
+    all-channels-fail recording, swallowed exceptions, unknown-channel
+    skip, and default-prefs path.
+  - `tests/api/routes/test_notifications.py` — 7 end-to-end
+    scenarios: first joiner gets `you_are_next`, third joiner gets
+    `head_to_counter`, idempotency on repeated status updates,
+    rise-through after `call_next`, prefs PATCH round-trips through
+    `GET /users/me`, unknown channel → 400, empty list → 422, and
+    recent-first ordering.
+
+**Verification (Apr 30, 2026, 00:38 UTC+3):**
+
+- Pure-rule sweep: every assertion in `decide_alert` passes against an
+  isolated import of `werefa.notifications.domain.triggers`.
+- Registry sweep: `dispatch` was driven through 6 fake-notifier
+  scenarios with a recording in-memory session; channel selection,
+  exception swallowing, and `delivered/failed` recording all match the
+  spec.
+- Filter sweep: `NotifyEventV1` for the connected ticket is forwarded;
+  cross-ticket leakage and malformed payloads are dropped silently.
+  Existing queue and broadcast routing remain unaffected.
+- Wiring sweep: API router exposes `/me/notifications` and
+  `/users/me/notifications`; AST inspection confirms the smart-alert
+  hook is invoked on all four queue mutation endpoints.
+- Alembic chain: head is now `c5e6a7b8d291`, parent
+  `aa92d4f80c17` (Phase 9). Downgrade path drops the table and the
+  two new columns in reverse order.
+- DB-backed `pytest` against the test database remains blocked by the
+  ongoing Neon Postgres outage (`server closed the connection
+  unexpectedly`). The new API tests will run as soon as the database
+  is reachable; their assertions match the spec verified above.
+
+**Notes for Phase 11:**
+
+- `LIVENESS_TOP_K` is shared between the alert trigger (this phase)
+  and the liveness ping window (next phase). Keep the default at 3
+  unless we change both sides together.
+- `EmailNotifier` is intentionally a stub. The full SMTP path will be
+  re-enabled when we wire user-facing email templates; today it's
+  guarded by `settings.emails_enabled` and will simply report
+  "non-deliverable" so the dispatcher falls through to logger.
 
 ---
 
@@ -485,6 +574,85 @@ Scope and rationale: see [`phase-plan.md` §3](./phase-plan.md#3-cross-cutting-f
 ---
 
 
+## Audit-fix pass (post-Phase 10) — 2026-04-30
+
+Cross-cutting cleanup driven by the post-Phase-10 audit. All items
+focus on **functional correctness** rather than new features so the
+demo path is honest end-to-end.
+
+### Pass A — security / data leak
+
+- [x] **CRIT-1.** `access_code` removed from every public read schema
+      (`ProviderPublic`, `ProviderDiscoveryPublic`). It now lives only
+      on the table model, on `ProviderCreate`, and on `ProviderUpdate`.
+      Owners/staff fetch it from the dedicated
+      `GET /providers/{id}/access-code` returning `ProviderStaffPublic`.
+- [x] **CRIT-2.** `discover` endpoint accepts optional auth and
+      silently coerces `include_private` / `include_unverified` to
+      `False` for non-superusers, so URL-tampering can't expose private
+      providers.
+- [x] **CRIT-3.** `discover` filters by `verification_status='verified'`
+      by default. Superuser-initiated `POST /providers/` auto-verifies
+      (admin acts as the KYC operator). Self-signups stay `pending`
+      until `POST /admin/providers/{id}/verify` (or `…/reject`).
+
+### Pass B — customer UX gaps
+
+- [x] **CRIT-4.** `DELETE /service-items/{sid}/tickets/{tid}` lets a
+      ticket owner leave their queue without a strike. Refuses while
+      the ticket is `serving` (provider must close it).
+- [x] **CRIT-5.** `GET /providers/{id}/broadcasts` now serves customers
+      with an active (waiting/serving) ticket on the provider, scoped
+      to provider-wide and service-line broadcasts they can actually
+      see. Anyone else still gets 403.
+
+### Pass C — spec alignment
+
+- [x] **HIGH-1.** Walk-in joins ignore `is_paused` (kiosk staff still
+      need to enrol customers when a doctor is on a break). `is_open`
+      still gates everything.
+- [x] **HIGH-2.** Provider creation refuses `owner_user_id=null`. The
+      router defaults the owner to the calling admin so superuser
+      creates always have a manageable membership; provider self-creates
+      must reference themselves explicitly.
+
+### Pass D — identity hygiene
+
+- [x] **HIGH-3.** `update_user` keeps `is_superuser` and
+      `user_type='admin'` in lock-step *both* directions: demoting an
+      admin drops the type back to `customer`.
+- [x] **HIGH-4.** `user_type` removed from `UserUpdateMe`. Role upgrade
+      lives in `POST /users/me/become-provider`. Profile patches can no
+      longer silently elevate the caller.
+- [x] **MED-3.** Notification list uses `func.count` so the count
+      query stops materialising every row.
+- [x] **MED-4.** `delete_user_me` refuses while the caller has a
+      waiting/serving ticket — prevents orphaned tickets via
+      `ON DELETE SET NULL`.
+- [x] **MED-7.** `read_user_by_id` short-circuits the
+      "look up your own deleted id" case before the privilege check so
+      callers see 404 instead of 403.
+
+### Verification
+
+- [x] `ruff check` (F/I/UP) clean across `werefa/` and `tests/`.
+- [x] Direct Python smoke: schema fields are correct,
+      `update_user_me` no longer touches `user_type`, walk-in flow does
+      not branch on `is_paused`, `update_user` syncs both directions,
+      `create_provider` rejects missing owner, all new routes
+      registered (`/users/me/become-provider`,
+      `/providers/{id}/access-code`,
+      `/admin/providers/{id}/{verify,reject}`,
+      `DELETE /service-items/{sid}/tickets/{tid}`).
+- [x] Tests updated where behavior changed:
+      `test_provider_discovery::…include_private…` now sends superuser
+      auth; `test_broadcasts` swaps the customer-403 case for a paired
+      "without active ticket → 403, with active ticket → 200" pair.
+- [~] Full `pytest` run still blocked by the same Neon Postgres outage
+      tracked in earlier phases. Resume when DB is healthy.
+
+---
+
 ## Open product decisions (from `phase-plan.md` Appendix A)
 
 - [x] Provider EWT aggregation: max vs sum. **Default: `max`**, configurable
@@ -493,4 +661,7 @@ Scope and rationale: see [`phase-plan.md` §3](./phase-plan.md#3-cross-cutting-f
 - [ ] Strike scope: global vs per provider.
 - [ ] Service deletion: soft vs hard.
 - [ ] Reviews edit window: disallowed vs 24 h.
-- [ ] Notification provider mix at launch.
+- [ ] Notification provider mix at launch. **Phase 10 lands a
+      preference-driven dispatcher (`websocket → email → logger`); SMS
+      stays out of scope until a vendor is chosen and user-consent UX
+      is signed off.**

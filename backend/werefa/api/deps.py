@@ -52,6 +52,44 @@ def get_current_user(session: SessionDep, token: TokenDep) -> User:
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
+def _decode_token_user(session: Session, token: str) -> User | None:
+    """Resolve a JWT to an active ``User`` or return ``None`` on any failure.
+
+    Used by the optional-auth dependency below so endpoints that *want*
+    to behave differently for known users (without forcing auth) can do
+    so without sprinkling try/except blocks at each call site.
+    """
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[security.ALGORITHM]
+        )
+        token_data = TokenPayload(**payload)
+    except (InvalidTokenError, ValidationError):
+        return None
+    user = session.get(User, token_data.sub)
+    if user is None or not user.is_active:
+        return None
+    return user
+
+
+_optional_oauth2 = OAuth2PasswordBearer(
+    tokenUrl=f"{settings.API_V1_STR}/login/access-token",
+    auto_error=False,
+)
+
+
+def get_optional_current_user(
+    session: SessionDep,
+    token: Annotated[str | None, Depends(_optional_oauth2)] = None,
+) -> User | None:
+    """Return the authenticated user if a valid token was supplied,
+    otherwise ``None``. Never raises — the route decides what to do
+    when the caller is anonymous."""
+    if not token:
+        return None
+    return _decode_token_user(session, token)
+
+
 def get_current_active_superuser(current_user: CurrentUser) -> User:
     if not current_user.is_superuser:
         raise HTTPException(
