@@ -1,0 +1,59 @@
+timeout: "1200s"
+
+substitutions:
+  _REGION: us-central1
+  _AR_REPO: werefa-repo
+  _SERVICE_NAME: werefa-backend
+  _PLATFORM: managed
+  _PORT: "8000"
+
+steps:
+  # Ensure Artifact Registry repo exists (safe to run on every build).
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: ensure-artifact-registry
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud artifacts repositories describe "${_AR_REPO}" \
+          --location "${_REGION}" >/dev/null 2>&1 || \
+        gcloud artifacts repositories create "${_AR_REPO}" \
+          --repository-format=docker \
+          --location "${_REGION}" \
+          --description="Werefa backend images"
+
+  - name: gcr.io/cloud-builders/docker
+    id: build-image
+    args:
+      - build
+      - -f
+      - backend/Dockerfile
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${SHORT_SHA}
+      - backend
+
+  - name: gcr.io/cloud-builders/docker
+    id: push-image
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${SHORT_SHA}
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: deploy-cloud-run
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE_NAME}
+      - --image
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${SHORT_SHA}
+      - --region
+      - ${_REGION}
+      - --platform
+      - ${_PLATFORM}
+      - --port
+      - ${_PORT}
+      - --quiet
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${SHORT_SHA}
