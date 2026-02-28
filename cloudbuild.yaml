@@ -35,7 +35,7 @@ steps:
       - backend/Dockerfile
       - -t
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${SHORT_SHA}
-      - backend
+      - .
 
   - name: gcr.io/cloud-builders/docker
     id: push-image
