@@ -206,6 +206,21 @@ class ProviderStaffPublic(ProviderPublic):
     access_code: str | None = None
 
 
+class MyProviderPublic(ProviderPublic):
+    """Row shape for ``GET /users/me/providers``.
+
+    Extends ``ProviderPublic`` with the caller's role on that provider so
+    the dashboard can badge "Owner" vs "Staff" without a second query.
+    """
+
+    membership_role: str
+
+
+class MyProvidersPublic(SQLModel):
+    data: list[MyProviderPublic]
+    count: int
+
+
 class ProviderDiscoveryPublic(ProviderPublic):
     distance_m: int | None = None
     active_tickets: int = 0

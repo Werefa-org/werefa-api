@@ -52,6 +52,31 @@ def get_membership(
     return session.exec(statement).first()
 
 
+def list_providers_for_user(
+    *,
+    session: Session,
+    user_id: uuid.UUID,
+    role: str | None = None,
+) -> list[tuple[Provider, str]]:
+    """Return every (provider, role) pair the user has a membership in.
+
+    Used by ``GET /users/me/providers`` so a logged-in provider/staff
+    can list their own businesses without remembering ids or slugs.
+    The role is returned alongside the provider so the UI can badge
+    "Owner" vs "Staff" rows.
+    """
+    statement = (
+        select(Provider, ProviderMembership.role)
+        .join(ProviderMembership, ProviderMembership.provider_id == Provider.id)  # type: ignore[arg-type]
+        .where(ProviderMembership.user_id == user_id)
+    )
+    if role is not None:
+        statement = statement.where(ProviderMembership.role == role)
+    statement = statement.order_by(col(Provider.created_at).desc())
+    rows = session.exec(statement).all()
+    return [(p, r) for p, r in rows]
+
+
 def distance_meters(
     *,
     base_lat: float,
