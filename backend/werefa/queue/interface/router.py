@@ -148,6 +148,30 @@ def call_next(
     return QueueEntryPublic.model_validate(nxt)
 
 
+@router.post("/{service_item_id}/recall", response_model=QueueEntryPublic)
+def recall_customer(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+) -> Any:
+    """FR-09: re-open the last completed ticket within a short staff-only window."""
+    svc = _service_or_404(session, service_item_id)
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=svc.provider_id,
+    )
+    row = queue_service.recall_last_completed(session, service_item_id)
+    notify_queue_subscribers(
+        session, service_item_id, ticket=row, reason="recall"
+    )
+    notifications_service.evaluate_smart_alerts_for_service_line(
+        session, service_item_id=service_item_id
+    )
+    return QueueEntryPublic.model_validate(row)
+
+
 @router.delete(
     "/{service_item_id}/tickets/{ticket_id}",
     response_model=QueueEntryPublic,
