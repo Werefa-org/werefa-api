@@ -1,220 +1,137 @@
-# FastAPI Project - Backend
+# Werefa Backend API
 
-## Requirements
+FastAPI backend for Werefa queueing and provider operations.
 
-* [Docker](https://www.docker.com/).
-* [uv](https://docs.astral.sh/uv/) for Python package and environment management.
+## Stack
 
-## Docker Compose
+- Python + FastAPI
+- SQLModel / SQLAlchemy + Alembic
+- PostgreSQL
+- Optional Redis for cross-worker WebSocket fan-out
+- `uv` for dependency and environment management
 
-Start the local development environment with Docker Compose following the guide in [../development.md](../development.md).
+## Architecture
 
-## General Workflow
+The app entrypoint is `werefa/main.py`. Routes are mounted under `/api/v1` and composed in `werefa/api/main.py`.
 
-By default, the dependencies are managed with [uv](https://docs.astral.sh/uv/), go there and install it.
+Feature domains follow a consistent layout:
 
-From `./backend/` you can install all the dependencies with:
+- `werefa/<feature>/interface`: HTTP and WebSocket routers
+- `werefa/<feature>/application`: use-case services
+- `werefa/<feature>/infrastructure`: repository/persistence adapters
+- `werefa/<feature>/domain`: domain models and policies
 
-```console
-$ uv sync
-```
+Core shared components:
 
-Then you can activate the virtual environment with:
+- `werefa/core/config.py`: settings and environment loading
+- `werefa/core/db.py`: database engine/session
+- `werefa/core/security.py`: password hashing and JWT helpers
+- `werefa/shared/models.py`: shared SQLModel entities
 
-```console
-$ source .venv/bin/activate
-```
+## Quick Start
 
-Make sure your editor is using the correct Python virtual environment, with the interpreter at `backend/.venv/bin/python`.
+### Option A: Docker Compose (recommended)
 
-Modify or add SQLModel models for data and SQL tables in `./backend/werefa/shared/models.py`, API endpoints in `./backend/werefa/api/`, and feature repositories in `./backend/werefa/*/infrastructure/`.
-
-## VS Code
-
-There are already configurations in place to run the backend through the VS Code debugger, so that you can use breakpoints, pause and explore variables, etc.
-
-The setup is also already configured so you can run the tests through the VS Code Python tests tab.
-
-## Docker Compose Override
-
-During development, you can change Docker Compose settings that will only affect the local development environment in the file `compose.override.yml`.
-
-The changes to that file only affect the local development environment, not the production environment. So, you can add "temporary" changes that help the development workflow.
-
-For example, the directory with the backend code is synchronized in the Docker container, copying the code you change live to the directory inside the container. That allows you to test your changes right away, without having to build the Docker image again. It should only be done during development, for production, you should build the Docker image with a recent version of the backend code. But during development, it allows you to iterate very fast.
-
-There is also a command override that runs `fastapi run --reload` instead of the default `fastapi run`. It starts a single server process (instead of multiple, as would be for production) and reloads the process whenever the code changes. Have in mind that if you have a syntax error and save the Python file, it will break and exit, and the container will stop. After that, you can restart the container by fixing the error and running again:
-
-```console
-$ docker compose watch
-```
-
-There is also a commented out `command` override, you can uncomment it and comment the default one. It makes the backend container run a process that does "nothing", but keeps the container alive. That allows you to get inside your running container and execute commands inside, for example a Python interpreter to test installed dependencies, or start the development server that reloads when it detects changes.
-
-To get inside the container with a `bash` session you can start the stack with:
-
-```console
-$ docker compose watch
-```
-
-and then in another terminal, `exec` inside the running container:
-
-```console
-$ docker compose exec backend bash
-```
-
-You should see an output like:
-
-```console
-root@7f2607af31c3:/app#
-```
-
-that means that you are in a `bash` session inside your container, as a `root` user, under the `/app/backend` directory; your Python package lives at `/app/backend/werefa`.
-
-There you can use the `fastapi run --reload` command to run the debug live reloading server.
-
-```console
-$ fastapi run --reload werefa/main.py
-```
-
-...it will look like:
-
-```console
-root@7f2607af31c3:/app/backend# fastapi run --reload werefa/main.py
-```
-
-and then hit enter. That runs the live reloading server that auto reloads when it detects code changes.
-
-Nevertheless, if it doesn't detect a change but a syntax error, it will just stop with an error. But as the container is still alive and you are in a Bash session, you can quickly restart it after fixing the error, running the same command ("up arrow" and "Enter").
-
-...this previous detail is what makes it useful to have the container alive doing nothing and then, in a Bash session, make it run the live reload server.
-
-## Backend tests
-
-To test the backend run:
-
-```console
-$ bash ./scripts/test.sh
-```
-
-The tests run with Pytest, modify and add tests to `./backend/tests/`.
-
-If you use GitHub Actions the tests will run automatically.
-
-## Real-time queue streams (Phase 3)
-
-Queue updates are available through WebSockets under `/api/v1/ws`:
-
-- Service line stream: `/service-items/{service_item_id}/stream?token=<access_token>`
-  - Access: provider staff or superuser for that provider.
-- Ticket stream: `/tickets/{ticket_id}/stream?token=<access_token>`
-  - Access: ticket owner, provider staff, or superuser.
-
-Event payload (`QueueEventV1`) includes:
-
-- `v`
-- `type`
-- `service_item_id`
-- `ticket_id`
-- `status`
-- `position`
-- `occurred_at`
-- `reason`
-
-For multi-worker deployments, set `REALTIME_REDIS_URL` so WebSocket fan-out is broadcast across workers through Redis pub/sub.
-
-## Provider discovery (Phase 4 start)
-
-Public discovery endpoint:
-
-- `GET /api/v1/providers/discover`
-
-Query params:
-
-- `latitude` (required)
-- `longitude` (required)
-- `radius_m` (optional)
-- `query` (optional text filter on provider name/slug)
-- `include_private` (default `false`)
-- `only_open` (default `true`)
-- `include_paused` (default `false`)
-- `limit` (default `20`)
-- `offset` (default `0`)
-
-Results are distance-sorted (nearest first) and include:
-
-- `distance_m`
-- `active_tickets`
-- `serving_tickets`
-- `estimated_wait_minutes`
-- `load_factor` (`low` / `medium` / `high`)
-
-### Test running stack
-
-If your stack is already up and you just want to run the tests, you can use:
+From the repository root:
 
 ```bash
+docker compose watch
+```
+
+Useful local URLs:
+
+- API: <http://localhost:8000>
+- Swagger: <http://localhost:8000/docs>
+- Adminer: <http://localhost:8080>
+- Mailcatcher: <http://localhost:1080>
+
+### Option B: Local backend process
+
+From `backend/`:
+
+```bash
+uv sync
+fastapi dev werefa/main.py
+```
+
+## Common Commands
+
+Run these from `backend/` unless noted.
+
+```bash
+# Start dev API locally
+fastapi dev werefa/main.py
+
+# Run with production-style server settings
+fastapi run werefa/main.py
+
+# Run DB prestart (wait, migrate, seed superuser)
+bash scripts/prestart.sh
+
+# Lint + type checks
+bash scripts/lint.sh
+
+# Format checks
+sh scripts/format.sh
+
+# Run tests with coverage
+bash scripts/test.sh
+
+# Run tests against already-running compose stack (from repo root)
 docker compose exec backend bash scripts/tests-start.sh
 ```
 
-That `/app/backend/scripts/tests-start.sh` script just calls `pytest` after making sure that the rest of the stack is running. If you need to pass extra arguments to `pytest`, you can pass them to that command and they will be forwarded.
+## Environment
 
-For example, to stop on first error:
+Settings are defined in `werefa/core/config.py` and loaded from `../.env` relative to `backend/` (repo-root `.env`).
 
-```bash
-docker compose exec backend bash scripts/tests-start.sh -x
-```
+Common required variables:
 
-### Test Coverage
+- `POSTGRES_SERVER`
+- `POSTGRES_PORT`
+- `POSTGRES_USER`
+- `POSTGRES_PASSWORD`
+- `POSTGRES_DB`
+- `SECRET_KEY`
+- `FIRST_SUPERUSER`
+- `FIRST_SUPERUSER_PASSWORD`
+- `ENVIRONMENT`
+- `FRONTEND_HOST`
 
-When the tests are run, a file `htmlcov/index.html` is generated, you can open it in your browser to see the coverage of the tests.
+Important optional variables:
+
+- `BACKEND_CORS_ORIGINS`
+- `POSTGRES_SSLMODE`
+- `SENTRY_DSN`
+- `REALTIME_REDIS_URL`
+- `SMTP_*` and `EMAILS_FROM_EMAIL` for email delivery
+
+## API and Real-Time Notes
+
+- HTTP API base path: `/api/v1`
+- Local-only private routes are mounted only when `ENVIRONMENT=local`
+- Queue streams are available over WebSockets under `/api/v1/ws`
+- For multi-worker deployments, set `REALTIME_REDIS_URL`
 
 ## Migrations
 
-As during local development your backend directory is mounted as a volume inside the container, you can also run the migrations with `alembic` commands inside the container and the migration code will be in your repository (instead of being only inside the container). So you can add it to your git repository.
+From `backend/`:
 
-Make sure you create a "revision" of your models and that you "upgrade" your database with that revision every time you change them. As this is what will update the tables in your database. Otherwise, your application will have errors.
-
-* Start an interactive session in the backend container:
-
-```console
-$ docker compose exec backend bash
+```bash
+alembic upgrade head
+alembic revision --autogenerate -m "your migration message"
 ```
 
-* Alembic is already configured to import your SQLModel models from `./backend/werefa/shared/models.py`.
+## Deployment
 
-* After changing a model (for example, adding a column), inside the container, create a revision, e.g.:
+Cloud Build and Cloud Run deployment are defined in `../cloudbuild.yaml`.
+The container starts with:
 
-```console
-$ alembic revision --autogenerate -m "Add column last_name to User model"
+```bash
+fastapi run --workers 1 --host 0.0.0.0 --port ${PORT:-8080} werefa/main.py
 ```
 
-* Commit to the git repository the files generated in the alembic directory.
+## Additional Docs
 
-* After creating the revision, run the migration in the database (this is what will actually change the database):
-
-```console
-$ alembic upgrade head
-```
-
-If you don't want to use migrations at all, uncomment the lines in the file at `./backend/werefa/core/db.py` that end in:
-
-```python
-SQLModel.metadata.create_all(engine)
-```
-
-and comment the line in the file `scripts/prestart.sh` that contains:
-
-```console
-$ alembic upgrade head
-```
-
-If you don't want to start with the default models and want to remove them / modify them, from the beginning, without having any previous revision, you can remove the revision files (`.py` Python files) under `./backend/werefa/alembic/versions/`. And then create a first migration as described above.
-
-## Email Templates
-
-The email templates are in `./backend/werefa/email-templates/`. Here, there are two directories: `build` and `src`. The `src` directory contains the source files that are used to build the final email templates. The `build` directory contains the final email templates that are used by the application.
-
-Before continuing, ensure you have the [MJML extension](https://github.com/mjmlio/vscode-mjml) installed in your VS Code.
-
-Once you have the MJML extension installed, you can create a new email template in the `src` directory. After creating the new email template and with the `.mjml` file open in your editor, open the command palette with `Ctrl+Shift+P` and search for `MJML: Export to HTML`. This will convert the `.mjml` file to a `.html` file and now you can save it in the build directory.
+- Local development: `../development.md`
+- Deployment details: `../deployment.md`
