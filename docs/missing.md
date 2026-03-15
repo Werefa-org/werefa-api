@@ -10,7 +10,7 @@ This document tracks **backend** gaps versus `docs/doc.md` (FR/UC/NFR) and inter
 
 | ID / area | Spec reference | What’s missing |
 |-----------|----------------|----------------|
-| **Join-time geofence** | FR-04, UC-02, UC-14 | Remote join must validate caller location vs `Provider.join_radius_m`. Today `join_queue_remote` never accepts coordinates and never enforces radius. |
+| ~~**Join-time geofence**~~ | ~~FR-04, UC-02, UC-14~~ | **Done:** Remote join accepts optional `latitude` / `longitude` on `QueueJoin`. When `Provider.join_radius_m` is set, coordinates are required and distance (Haversine via `provider_repo.distance_meters`) must be ≤ radius; walk-ins unchanged. |
 | **Liveness / presence** | FR-05, UC-03 | Top-of-queue GPS checks, position pings, `liveness_state`, flagged-vs-no-show rules. No data model or endpoints. |
 | **QR / deep link entry** | FR-02, UC-12 | `TicketSource` only has `remote_app` and `kiosk_walk_in`. Need `qr_scan` (or equivalent), resolve deep link / token to provider+service, optional join bypass rules per spec. |
 | **Offline kiosk sync** | NFR-02, Scenario D | Batch walk-in ingest with idempotency, conflict resolution, replay-safe API. |
@@ -65,7 +65,7 @@ This document tracks **backend** gaps versus `docs/doc.md` (FR/UC/NFR) and inter
 1. ~~**Spec correctness:** Tighten `no_show` transition rules~~ **Done.** Optionally revisit call-next semantics.
 2. ~~**FR-10:** DELETE service with active-ticket check~~ **Done.**
 3. ~~**FR-09:** Recall endpoint + tests~~ **Done.**
-4. **FR-04:** Join body with lat/lng + Haversine vs `join_radius_m` (+ optional “no GPS” path per doc).
+4. ~~**FR-04:** Join body with lat/lng + Haversine vs `join_radius_m`~~ **Done.**
 5. **FR-05:** Liveness model + top-K workflow + tests.
 6. **FR-02 / UC-12:** QR source + deep-link join resolution.
 7. **NFR-02:** Offline batch sync API + idempotency store.

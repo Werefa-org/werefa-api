@@ -60,6 +60,8 @@ def join_queue(
         service_item_id=service_item_id,
         user=current_user,
         access_code=body.access_code,
+        latitude=body.latitude,
+        longitude=body.longitude,
     )
     notify_queue_subscribers(
         session, service_item_id, ticket=ticket, reason="join"

@@ -362,6 +362,14 @@ class QueueEntry(QueueEntryBase, table=True):
 
 class QueueJoin(SQLModel):
     access_code: str | None = Field(default=None, max_length=6)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+
+    @model_validator(mode="after")
+    def _coords_paired(self) -> Self:
+        if (self.latitude is None) ^ (self.longitude is None):
+            raise ValueError("latitude and longitude must be supplied together")
+        return self
 
 
 class WalkInCreate(SQLModel):
