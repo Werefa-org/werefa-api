@@ -33,6 +33,15 @@ class TicketSource(str, Enum):
     kiosk_walk_in = "kiosk_walk_in"
 
 
+class LivenessState(str, Enum):
+    """Queue-entry liveness for remote top-K presence (FR-05)."""
+
+    idle = "idle"
+    awaiting = "awaiting"
+    ok = "ok"
+    flagged = "flagged"
+
+
 class BroadcastSeverity(str, Enum):
     """Provider broadcast severity tags (FR-08).
 
@@ -50,6 +59,8 @@ class NotificationKind(str, Enum):
 
     head_to_counter = "head_to_counter"
     you_are_next = "you_are_next"
+    # FR-05 / Phase 11: prompt for GPS ping when entering top-K remotely.
+    liveness_ping_request = "liveness_ping_request"
 
 
 class NotificationChannel(str, Enum):
