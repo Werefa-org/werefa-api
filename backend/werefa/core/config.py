@@ -132,6 +132,12 @@ class Settings(BaseSettings):
     # list of channels new users start with — the first deliverable
     # channel wins per dispatch.
     LIVENESS_TOP_K: int = 3
+    # FR-05: after entering top-K remotely, the customer must ping within this
+    # many seconds or the ticket is ``flagged`` (hint for staff — not auto strike).
+    LIVENESS_GRACE_SECONDS: int = 600
+    # FR-05 sync can add ledger rows; turn off in tests that assert strict
+    # FR-07 notification counts.
+    LIVENESS_ENABLED: bool = True
     NOTIFICATION_DEFAULT_PREFS: list[str] = ["websocket", "email", "logger"]
 
     def _check_default_secret(self, var_name: str, value: str | None) -> None:
