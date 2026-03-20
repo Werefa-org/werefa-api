@@ -3,7 +3,6 @@
 This document tracks **backend** gaps versus `docs/doc.md` (FR/UC/NFR) and internal product expectations. Use it as the implementation backlog.
 
 **Status legend:** Missing | Partial | Spec mismatch (code exists but behavior does not match the PDF)
-
 ---
 
 ## Critical missing (no or negligible backend support)
@@ -11,7 +10,7 @@ This document tracks **backend** gaps versus `docs/doc.md` (FR/UC/NFR) and inter
 | ID / area | Spec reference | What’s missing |
 |-----------|----------------|----------------|
 | ~~**Join-time geofence**~~ | ~~FR-04, UC-02, UC-14~~ | **Done:** Remote join accepts optional `latitude` / `longitude` on `QueueJoin`. When `Provider.join_radius_m` is set, coordinates are required and distance (Haversine via `provider_repo.distance_meters`) must be ≤ radius; walk-ins unchanged. |
-| **Liveness / presence** | FR-05, UC-03 | Top-of-queue GPS checks, position pings, `liveness_state`, flagged-vs-no-show rules. No data model or endpoints. |
+| ~~**Liveness / presence**~~ | ~~FR-05, UC-03~~ | **Done (MVP):** `queue_entry.liveness_state` + `position_ping`; `POST …/tickets/{id}/position`, `GET …/tickets/{id}/liveness`; top-`LIVENESS_TOP_K` remote waits enter `awaiting`, `liveness_ping_request` notification, grace `LIVENESS_GRACE_SECONDS`, then `flagged` (hint only — no auto strike); sync runs from smart-alert eval + lazy read. |
 | **QR / deep link entry** | FR-02, UC-12 | `TicketSource` only has `remote_app` and `kiosk_walk_in`. Need `qr_scan` (or equivalent), resolve deep link / token to provider+service, optional join bypass rules per spec. |
 | **Offline kiosk sync** | NFR-02, Scenario D | Batch walk-in ingest with idempotency, conflict resolution, replay-safe API. |
 | ~~**Recall customer**~~ | ~~FR-09~~ | **Done:** `POST /service-items/{id}/recall` — staff-only; most recent **completed** ticket on the line within `RECALL_COMPLETED_WINDOW_SECONDS` (default 90s) returns to **serving**; 409 if someone is already serving, if a review exists, or if the customer already has another active ticket. |
@@ -36,7 +35,6 @@ This document tracks **backend** gaps versus `docs/doc.md` (FR/UC/NFR) and inter
 | **Broadcasts** | FR-08, UC-11 | Create/list, idempotency, severity, realtime fan-out. | Optional: preset templates, stricter “waiting-only” dispatch rules per exact PDF wording. |
 | **Notification inbox UX** | Product | `notification` ledger + list endpoint. | No **`read` / `read_at`** (or equivalent) for unread counts in UI. |
 | **EWT proof** | FR-06, NFR-01 | WMA in `queue/application/ewt.py` + discovery. | No bundled **simulation dataset** or performance proof for report/demo. |
-
 ---
 
 ## Spec mismatches — code exists but violates or diverges from doc
@@ -46,7 +44,6 @@ This document tracks **backend** gaps versus `docs/doc.md` (FR/UC/NFR) and inter
 | ~~**No-show from wrong state**~~ | ~~US-SP-06: no-show **after** called~~ | ~~`queue/domain/ticket_rules.py`~~ | **Done (2026):** `no_show` requires `serving`, same as `completed`. |
 | **Call-next auto-completes serving** | Some QMS specs: call next only promotes waiting→serving; complete is separate | `queue/application/service.py` — `call_next_transition` marks current `serving` as `completed` before taking next. | Product decision: keep (fast kiosk) vs split into explicit “complete current” + “call next”. |
 | **Review eligibility** | FR-11 wording: after provider marks completed | `reviews/domain/review_rules.py` checks `ticket_status == completed` only. | Usually sufficient; optional: assert last transition actor if you need literal “provider closed ticket”. |
-
 ---
 
 ## Non-functional (backend-relevant)
@@ -57,7 +54,6 @@ This document tracks **backend** gaps versus `docs/doc.md` (FR/UC/NFR) and inter
 | **NFR-03** | 1k concurrent joins | Not load-tested in codebase. |
 | **NFR-04** | Encryption at rest | App does not implement field-level encryption; depends on Postgres/hosting. |
 | **NFR-05** | 99.5% uptime | Operational; not enforced in code. |
-
 ---
 
 ## Suggested implementation order (backend only)
@@ -66,20 +62,19 @@ This document tracks **backend** gaps versus `docs/doc.md` (FR/UC/NFR) and inter
 2. ~~**FR-10:** DELETE service with active-ticket check~~ **Done.**
 3. ~~**FR-09:** Recall endpoint + tests~~ **Done.**
 4. ~~**FR-04:** Join body with lat/lng + Haversine vs `join_radius_m`~~ **Done.**
-5. **FR-05:** Liveness model + top-K workflow + tests.
+5. ~~**FR-05:** Liveness model + top-K workflow + tests~~ **Done (MVP:** ping + flagged hint; no moving-vector / “converging” heuristic).**
 6. **FR-02 / UC-12:** QR source + deep-link join resolution.
 7. **NFR-02:** Offline batch sync API + idempotency store.
 8. **UC-07:** Event emission hooks + analytics queries + CSV export.
 9. **UC-10:** Documents table + upload + reject reason.
 10. **UC-15 / UC-16:** Health/metrics and governance APIs as needed.
-
 ---
 
 ## Reference files (starting points)
 
 | Topic | Files |
 |-------|--------|
-| Remote join / walk-in + recall | `backend/werefa/queue/application/service.py`, `backend/werefa/queue/interface/router.py` |
+| Remote join / walk-in / recall / liveness | `backend/werefa/queue/application/service.py`, `…/liveness_service.py`, `backend/werefa/queue/interface/router.py` |
 | Ticket rules | `backend/werefa/queue/domain/ticket_rules.py` |
 | Services CRUD + delete | `backend/werefa/service_items/interface/router.py`, `…/application/service.py` |
 | Provider + discover | `backend/werefa/providers/application/service.py`, `…/interface/router.py` |
