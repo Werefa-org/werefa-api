@@ -31,6 +31,7 @@ class TicketStatus(str, Enum):
 class TicketSource(str, Enum):
     remote_app = "remote_app"
     kiosk_walk_in = "kiosk_walk_in"
+    qr_scan = "qr_scan"
 
 
 class LivenessState(str, Enum):
@@ -73,6 +74,8 @@ class NotificationChannel(str, Enum):
 
     websocket = "websocket"
     email = "email"
+    push = "push"
+    sms = "sms"
     logger = "logger"
 
 
@@ -80,3 +83,14 @@ class NotificationStatus(str, Enum):
     delivered = "delivered"
     failed = "failed"
     skipped = "skipped"
+
+
+class DemandEventType(str, Enum):
+    """High-level funnel / queue analytics (UC-07, lost demand)."""
+
+    join_remote = "join_remote"
+    join_walk_in = "join_walk_in"
+    join_qr = "join_qr"
+    join_walk_in_batch = "join_walk_in_batch"
+    service_view = "service_view"
+    queue_abandon = "queue_abandon"
