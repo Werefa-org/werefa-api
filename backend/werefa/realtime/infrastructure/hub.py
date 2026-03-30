@@ -34,6 +34,12 @@ class InMemoryQueueHub:
 
         return q, _unsub
 
+    async def subscriber_snapshot(self) -> tuple[int, dict[str, int]]:
+        async with self._lock:
+            by_line = {str(k): len(v) for k, v in self._subscribers.items()}
+            total = sum(len(v) for v in self._subscribers.values())
+        return total, by_line
+
     async def local_publish(self, service_item_id: uuid.UUID, message: str) -> None:
         async with self._lock:
             subs = list(self._subscribers.get(service_item_id, ()))

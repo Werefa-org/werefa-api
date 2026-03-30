@@ -29,6 +29,9 @@ class RealtimeCoordinator:
             await self._redis.shutdown()
         self._redis = None
 
+    async def websocket_subscriber_snapshot(self) -> tuple[int, dict[str, int]]:
+        return await self.hub.subscriber_snapshot()
+
     async def publish(self, service_item_id: uuid.UUID, message: str) -> None:
         if self._redis is not None:
             await self._redis.publish_to_channel(service_item_id, message)
