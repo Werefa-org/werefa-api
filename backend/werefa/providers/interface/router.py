@@ -1,7 +1,8 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 
 from werefa.api.deps import (
     CurrentUser,
@@ -11,7 +12,7 @@ from werefa.api.deps import (
     ensure_provider_staff,
     get_optional_current_user,
 )
-from werefa.providers.application import service as provider_service
+from werefa.providers.application import documents_service, service as provider_service
 from werefa.providers.application.service import provider_public_view
 from werefa.shared.enums import UserType
 from werefa.shared.models import (
@@ -21,7 +22,10 @@ from werefa.shared.models import (
     MyProvidersPublic,
     ProviderCreate,
     ProviderDiscoveriesPublic,
+    ProviderDocument,
+    ProviderDocumentPublic,
     ProviderPublic,
+    ProviderRejectBody,
     ProviderStaffPublic,
     ProviderUpdate,
     User,
@@ -132,7 +136,13 @@ def read_provider_access_code(
     p = provider_service.get_provider(session, provider_id)
     if p is None:
         raise HTTPException(status_code=404, detail="Provider not found")
-    return ProviderStaffPublic.model_validate(p, update=provider_public_view(p))
+    return ProviderStaffPublic.model_validate(
+        p,
+        update={
+            **provider_public_view(p),
+            "last_rejection_reason": p.last_rejection_reason,
+        },
+    )
 
 
 @router.get("/by-slug/{slug}", response_model=ProviderPublic)
@@ -209,6 +219,57 @@ def remove_provider_member(
     return provider_service.remove_provider_member(session, provider_id, member_user_id)
 
 
+@router.get(
+    "/{provider_id}/documents",
+    response_model=list[ProviderDocumentPublic],
+)
+def list_provider_documents(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+) -> Any:
+    if provider_service.get_provider(session, provider_id) is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    if not current_user.is_superuser:
+        ensure_provider_staff(
+            session=session,
+            current_user=current_user,
+            provider_id=provider_id,
+        )
+    rows = documents_service.list_documents(session, provider_id=provider_id)
+    return [documents_service.document_public(r) for r in rows]
+
+
+@router.get("/{provider_id}/documents/{doc_id}/file")
+def download_provider_document(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+    doc_id: uuid.UUID,
+) -> Any:
+    if provider_service.get_provider(session, provider_id) is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    if not current_user.is_superuser:
+        ensure_provider_staff(
+            session=session,
+            current_user=current_user,
+            provider_id=provider_id,
+        )
+    row = session.get(ProviderDocument, doc_id)
+    if row is None or row.provider_id != provider_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+    path = documents_service.get_document_path(
+        session, provider_id=provider_id, doc_id=doc_id
+    )
+    return FileResponse(
+        path,
+        media_type=row.content_type,
+        filename=row.filename,
+    )
+
+
 me_router = APIRouter(prefix="/users/me/providers", tags=["providers"])
 
 
@@ -238,7 +299,11 @@ def list_my_providers(
     items = [
         MyProviderPublic.model_validate(
             p,
-            update={**provider_public_view(p), "membership_role": member_role},
+            update={
+                **provider_public_view(p),
+                "membership_role": member_role,
+                "last_rejection_reason": p.last_rejection_reason,
+            },
         )
         for p, member_role in rows
     ]
@@ -257,7 +322,9 @@ def admin_verify_provider(
 ) -> Any:
     """Admin (UC-10) flips a pending provider to ``verified`` so it
     appears in public discovery."""
-    p = provider_service.admin_verify_provider(session, provider_id)
+    p = provider_service.admin_verify_provider(
+        session, provider_id, actor=_admin
+    )
     return ProviderPublic.model_validate(p, update=provider_public_view(p))
 
 
@@ -267,8 +334,33 @@ def admin_reject_provider(
     session: SessionDep,
     _admin: SuperUser,
     provider_id: uuid.UUID,
+    body: ProviderRejectBody,
 ) -> Any:
     """Admin (UC-10) marks a provider as ``rejected`` — it stays out of
     public discovery and the owner sees the status on their dashboard."""
-    p = provider_service.admin_reject_provider(session, provider_id)
+    p = provider_service.admin_reject_provider(
+        session, provider_id, actor=_admin, reason=body.reason
+    )
     return ProviderPublic.model_validate(p, update=provider_public_view(p))
+
+
+@admin_router.post(
+    "/{provider_id}/documents",
+    response_model=ProviderDocumentPublic,
+)
+async def admin_upload_provider_document(
+    *,
+    session: SessionDep,
+    _admin: SuperUser,
+    provider_id: uuid.UUID,
+    file: UploadFile = File(...),
+) -> Any:
+    if provider_service.get_provider(session, provider_id) is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    row = documents_service.store_provider_document(
+        session,
+        provider_id=provider_id,
+        uploader=_admin,
+        upload=file,
+    )
+    return documents_service.document_public(row)

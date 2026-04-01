@@ -56,23 +56,48 @@ def create_provider(
     )
 
 
-def admin_verify_provider(session: Session, provider_id: uuid.UUID) -> Provider:
+def admin_verify_provider(
+    session: Session, provider_id: uuid.UUID, *, actor: User
+) -> Provider:
     p = session.get(Provider, provider_id)
     if p is None:
         raise HTTPException(status_code=404, detail="Provider not found")
     p.verification_status = VerificationStatus.verified.value
     session.add(p)
+    from werefa.admin.application import service as admin_service
+
+    admin_service.log_admin_action(
+        session,
+        actor=actor,
+        action="provider.verify",
+        entity_type="provider",
+        entity_id=provider_id,
+        details=None,
+    )
     session.commit()
     session.refresh(p)
     return p
 
 
-def admin_reject_provider(session: Session, provider_id: uuid.UUID) -> Provider:
+def admin_reject_provider(
+    session: Session, provider_id: uuid.UUID, *, actor: User, reason: str
+) -> Provider:
     p = session.get(Provider, provider_id)
     if p is None:
         raise HTTPException(status_code=404, detail="Provider not found")
     p.verification_status = VerificationStatus.rejected.value
+    p.last_rejection_reason = reason
     session.add(p)
+    from werefa.admin.application import service as admin_service
+
+    admin_service.log_admin_action(
+        session,
+        actor=actor,
+        action="provider.reject",
+        entity_type="provider",
+        entity_id=provider_id,
+        details={"reason": reason},
+    )
     session.commit()
     session.refresh(p)
     return p
