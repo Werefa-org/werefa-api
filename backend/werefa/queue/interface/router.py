@@ -6,11 +6,17 @@ from sqlmodel import col, select
 
 from werefa.api.deps import CurrentUser, SessionDep, ensure_provider_staff
 from werefa.notifications.application import service as notifications_service
+from werefa.queue.application import join_invite_service
 from werefa.queue.application import liveness_service
+from werefa.queue.application import kiosk_batch_service
 from werefa.queue.application import service as queue_service
 from werefa.realtime.notify import notify_queue_subscribers
 from werefa.shared.enums import TicketStatus
 from werefa.shared.models import (
+    JoinInviteCreate,
+    JoinInviteCreated,
+    KioskSyncBatchIn,
+    KioskSyncBatchOut,
     LivenessPublic,
     PositionPingCreate,
     QueueEntriesPublic,
@@ -65,6 +71,7 @@ def join_queue(
         access_code=body.access_code,
         latitude=body.latitude,
         longitude=body.longitude,
+        invite_token=body.invite_token,
     )
     notify_queue_subscribers(
         session, service_item_id, ticket=ticket, reason="join"
@@ -73,6 +80,58 @@ def join_queue(
         session, service_item_id=service_item_id
     )
     return QueueEntryPublic.model_validate(ticket)
+
+
+@router.post(
+    "/{service_item_id}/join-invites",
+    response_model=JoinInviteCreated,
+)
+def create_join_invite(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    body: JoinInviteCreate,
+) -> Any:
+    svc = _service_or_404(session, service_item_id)
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=svc.provider_id,
+    )
+    row = join_invite_service.create_invite(
+        session,
+        service_item_id=service_item_id,
+        ttl_hours=body.ttl_hours,
+    )
+    return JoinInviteCreated(token=row.token, expires_at=row.expires_at)
+
+
+@router.post(
+    "/{service_item_id}/kiosk-sync-batch",
+    response_model=KioskSyncBatchOut,
+)
+def kiosk_sync_batch(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    body: KioskSyncBatchIn,
+) -> Any:
+    svc = _service_or_404(session, service_item_id)
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=svc.provider_id,
+    )
+    out = kiosk_batch_service.ingest_kiosk_walk_in_batch(
+        session, service_item_id=service_item_id, body=body
+    )
+    notify_queue_subscribers(session, service_item_id, reason="walk_in_batch")
+    notifications_service.evaluate_smart_alerts_for_service_line(
+        session, service_item_id=service_item_id
+    )
+    return out
 
 
 @router.post(

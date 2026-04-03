@@ -7,6 +7,7 @@ from sqlmodel import Session, col, select
 
 from werefa.core.config import settings
 from werefa.providers.infrastructure import repo as provider_repo
+from werefa.queue.application import join_invite_service
 from werefa.queue.domain import ticket_rules
 from werefa.shared.enums import TicketSource, TicketStatus
 from werefa.shared.models import Provider, QueueEntry, Review, ServiceItem, User, utcnow
@@ -64,6 +65,7 @@ def join_queue_remote(
     access_code: str | None,
     latitude: float | None = None,
     longitude: float | None = None,
+    invite_token: str | None = None,
 ) -> QueueEntry:
     svc = get_service_for_update(session, service_item_id)
     if not svc.is_active:
@@ -79,7 +81,13 @@ def join_queue_remote(
         )
 
     if provider.is_private:
-        if not access_code or access_code != (provider.access_code or ""):
+        invite_ok = join_invite_service.assert_invite_valid_for_service(
+            session, token=invite_token, service_item_id=service_item_id
+        )
+        code_ok = bool(
+            access_code and access_code == (provider.access_code or "")
+        )
+        if not code_ok and not invite_ok:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Invalid or missing access code",
@@ -119,6 +127,13 @@ def join_queue_remote(
 
     assert_single_active_ticket(session, user.id)
 
+    invite_ok = join_invite_service.assert_invite_valid_for_service(
+        session, token=invite_token, service_item_id=service_item_id
+    )
+    source = (
+        TicketSource.qr_scan.value if invite_ok else TicketSource.remote_app.value
+    )
+
     num = svc.next_ticket_number
     svc.next_ticket_number = num + 1
     session.add(svc)
@@ -128,7 +143,7 @@ def join_queue_remote(
         user_id=user.id,
         ticket_number=num,
         status=TicketStatus.waiting.value,
-        source=TicketSource.remote_app.value,
+        source=source,
         guest_name=None,
     )
     session.add(ticket)
@@ -144,6 +159,19 @@ def join_queue_remote(
             ) from None
         raise
     session.refresh(ticket)
+    from werefa.analytics.application.service import record_demand_event
+    from werefa.shared.enums import DemandEventType
+
+    record_demand_event(
+        session,
+        event_type=(
+            DemandEventType.join_qr if invite_ok else DemandEventType.join_remote
+        ),
+        provider_id=provider.id,
+        service_item_id=service_item_id,
+        user_id=user.id,
+        payload={"ticket_id": str(ticket.id)},
+    )
     return ticket
 
 
@@ -185,6 +213,17 @@ def join_queue_walk_in(
     session.add(ticket)
     session.commit()
     session.refresh(ticket)
+    from werefa.analytics.application.service import record_demand_event
+    from werefa.shared.enums import DemandEventType
+
+    record_demand_event(
+        session,
+        event_type=DemandEventType.join_walk_in,
+        provider_id=provider.id,
+        service_item_id=service_item_id,
+        user_id=None,
+        payload={"ticket_id": str(ticket.id)},
+    )
     return ticket
 
 
@@ -290,6 +329,18 @@ def cancel_my_ticket(
     session.add(ticket)
     session.commit()
     session.refresh(ticket)
+    from werefa.analytics.application.service import record_demand_event
+    from werefa.shared.enums import DemandEventType
+
+    svc = session.get(ServiceItem, ticket.service_item_id)
+    record_demand_event(
+        session,
+        event_type=DemandEventType.queue_abandon,
+        provider_id=svc.provider_id if svc else None,
+        service_item_id=ticket.service_item_id,
+        user_id=user.id,
+        payload={"ticket_id": str(ticket.id)},
+    )
     return ticket
 
 
