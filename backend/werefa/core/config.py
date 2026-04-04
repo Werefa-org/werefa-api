@@ -140,6 +140,17 @@ class Settings(BaseSettings):
     LIVENESS_ENABLED: bool = True
     NOTIFICATION_DEFAULT_PREFS: list[str] = ["websocket", "email", "logger"]
 
+    MAX_FAILED_LOGIN_ATTEMPTS: int = 5
+    LOGIN_LOCKOUT_MINUTES: int = 15
+
+    # US-SYS-00 OTP stub + KYC storage
+    OTP_TTL_MINUTES: int = 10
+    KYC_DOCUMENTS_DIR: str = "./data/kyc_documents"
+
+    # Optional — when set, push/sms notifiers report "delivered" for wiring tests.
+    PUSH_DELIVERY_STUB_ENABLED: bool = False
+    SMS_DELIVERY_STUB_ENABLED: bool = False
+
     def _check_default_secret(self, var_name: str, value: str | None) -> None:
         if value == "changethis":
             message = (

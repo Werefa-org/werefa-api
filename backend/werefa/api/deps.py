@@ -46,6 +46,11 @@ def get_current_user(session: SessionDep, token: TokenDep) -> User:
         raise HTTPException(status_code=404, detail="User not found")
     if not user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
+    if user.is_suspended:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account suspended",
+        )
     return user
 
 
@@ -67,7 +72,7 @@ def _decode_token_user(session: Session, token: str) -> User | None:
     except (InvalidTokenError, ValidationError):
         return None
     user = session.get(User, token_data.sub)
-    if user is None or not user.is_active:
+    if user is None or not user.is_active or user.is_suspended:
         return None
     return user
 

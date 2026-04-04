@@ -1,9 +1,15 @@
 from fastapi import APIRouter
 
+from werefa.admin.interface.router import router as admin_platform_router
+from werefa.analytics.interface.router import (
+    admin_router as analytics_admin_router,
+)
+from werefa.analytics.interface.router import router as analytics_router
 from werefa.api.routes import private, utils
 from werefa.broadcasts.interface import router as broadcasts_router_module
 from werefa.core.config import settings
 from werefa.identity.interface import login_router, users_router
+from werefa.join_invites.interface.router import router as join_invites_router
 from werefa.notifications.interface.router import (
     prefs_router as notifications_prefs_router,
 )
@@ -33,6 +39,10 @@ api_router = APIRouter()
 api_router.include_router(login_router.router)
 api_router.include_router(users_router.router)
 api_router.include_router(utils.router)
+api_router.include_router(join_invites_router)
+api_router.include_router(analytics_router)
+api_router.include_router(analytics_admin_router)
+api_router.include_router(admin_platform_router)
 api_router.include_router(providers_router.router)
 api_router.include_router(providers_me_router)
 api_router.include_router(providers_admin_router)

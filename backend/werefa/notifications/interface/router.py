@@ -1,5 +1,6 @@
 """HTTP surface for smart pre-alerts (FR-07)."""
 
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Query
@@ -15,6 +16,22 @@ from werefa.shared.models import (
 
 router = APIRouter(prefix="/me", tags=["notifications"])
 prefs_router = APIRouter(prefix="/users", tags=["notifications"])
+
+
+@router.post(
+    "/notifications/{notification_id}/read",
+    response_model=NotificationPublic,
+)
+def mark_my_notification_read(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    notification_id: uuid.UUID,
+) -> Any:
+    row = notifications_service.mark_notification_read(
+        session, user=current_user, notification_id=notification_id
+    )
+    return NotificationPublic.model_validate(row)
 
 
 @router.get("/notifications", response_model=NotificationsPublic)
