@@ -16,21 +16,10 @@ updates:
     commit-message:
       prefix: ⬆
     labels: [dependencies, internal]
-  # bun
-  - package-ecosystem: bun
-    directory: /
-    schedule:
-      interval: weekly
-    commit-message:
-      prefix: ⬆
-    labels: [dependencies, internal]
-    ignore:
-      - dependency-name: "@hey-api/openapi-ts"
   # Docker
   - package-ecosystem: docker
     directories:
       - /backend
-      - /frontend
     schedule:
       interval: weekly
     commit-message:

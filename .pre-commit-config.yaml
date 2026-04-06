@@ -19,13 +19,6 @@ repos:
         exclude: ^frontend/src/client/.*
   - repo: local
     hooks:
-      - id: local-biome-check
-        name: biome check
-        entry: npm run lint
-        language: system
-        types: [text]
-        files: ^frontend/
-
       - id: local-ruff-check
         name: ruff check
         entry: uv run ruff check --force-exclude --fix --exit-non-zero-on-fix
@@ -53,13 +46,6 @@ repos:
         require_serial: true
         language: unsupported
         pass_filenames: false
-
-      - id: generate-frontend-sdk
-        name: Generate Frontend SDK
-        entry: bash ./scripts/generate-client.sh
-        pass_filenames: false
-        language: unsupported
-        files: ^backend/.*$|^scripts/generate-client\.sh$
 
       - id: add-release-date
         language: unsupported
