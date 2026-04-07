@@ -176,6 +176,40 @@ def update_provider(
     return ProviderPublic.model_validate(p, update=provider_public_view(p))
 
 
+@router.post("/{provider_id}/pause-queue", response_model=ProviderPublic)
+def pause_provider_queue(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+) -> Any:
+    """Pause **remote** queue joins for this business (walk-ins still allowed when open)."""
+    ensure_provider_staff(
+        session=session, current_user=current_user, provider_id=provider_id
+    )
+    p = provider_service.set_provider_queue_paused(
+        session, provider_id, paused=True
+    )
+    return ProviderPublic.model_validate(p, update=provider_public_view(p))
+
+
+@router.post("/{provider_id}/resume-queue", response_model=ProviderPublic)
+def resume_provider_queue(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+) -> Any:
+    """Resume **remote** queue joins after ``pause-queue``."""
+    ensure_provider_staff(
+        session=session, current_user=current_user, provider_id=provider_id
+    )
+    p = provider_service.set_provider_queue_paused(
+        session, provider_id, paused=False
+    )
+    return ProviderPublic.model_validate(p, update=provider_public_view(p))
+
+
 @router.post("/{provider_id}/members", response_model=MembershipPublic)
 def add_provider_member(
     *,
