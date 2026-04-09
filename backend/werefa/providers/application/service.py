@@ -200,9 +200,10 @@ def add_provider_member(
 
 def list_provider_members(
     session: Session, provider_id: uuid.UUID
-) -> list[ProviderMembership]:
+) -> list[tuple[ProviderMembership, User]]:
     rows = session.exec(
-        select(ProviderMembership)
+        select(ProviderMembership, User)
+        .join(User, ProviderMembership.user_id == User.id)
         .where(ProviderMembership.provider_id == provider_id)
         .order_by(col(ProviderMembership.role), col(ProviderMembership.user_id))
     ).all()
