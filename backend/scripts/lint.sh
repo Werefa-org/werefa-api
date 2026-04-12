@@ -3,7 +3,7 @@
 set -e
 set -x
 
-mypy app
-ty check app
-ruff check app
-ruff format app --check
+mypy werefa
+ty check werefa
+ruff check werefa
+ruff format werefa --check

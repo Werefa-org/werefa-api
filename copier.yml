@@ -65,7 +65,7 @@ _exclude:
   - .mypy_cache
   # Python
   - __pycache__
-  - app.egg-info
+  - werefa.egg-info
   - "*.pyc"
   - .mypy_cache
   - .coverage

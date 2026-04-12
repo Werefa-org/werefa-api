@@ -1,10 +1,10 @@
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
-from app import crud
-from app.core.config import settings
-from app.models import User, UserCreate, UserUpdate
 from tests.utils.utils import random_email, random_lower_string
+from werefa import crud
+from werefa.core.config import settings
+from werefa.models import User, UserCreate, UserUpdate
 
 
 def user_authentication_headers(

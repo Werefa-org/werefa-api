@@ -76,7 +76,7 @@ And then you can run the local development server for the backend:
 
 ```bash
 cd backend
-fastapi dev app/main.py
+fastapi dev werefa/main.py
 ```
 
 ## Docker Compose in `localhost.tiangolo.com`

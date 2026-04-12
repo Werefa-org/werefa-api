@@ -8,7 +8,7 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "app",
+    "werefa",
 ]
 
 [[package]]
@@ -56,67 +56,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/96/f0/5eb65b2bb0d09ac6776f2eb54adee6abe8228ea05b20a5ad0e4945de8aac/anyio-4.12.1.tar.gz", hash = "sha256:41cfcc3a4c85d3f05c932da7c26d0201ac36f72abd4435ba90d0464a3ffed703", size = 228685, upload-time = "2026-01-06T11:45:21.246Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/0e/27be9fdef66e72d64c0cdc3cc2823101b80585f8119b5c112c2e8f5f7dab/anyio-4.12.1-py3-none-any.whl", hash = "sha256:d405828884fc140aa80a3c667b8beed277f1dfedec42ba031bd6ac3db606ab6c", size = 113592, upload-time = "2026-01-06T11:45:19.497Z" },
-]
-
-[[package]]
-name = "app"
-version = "0.1.0"
-source = { editable = "backend" }
-dependencies = [
-    { name = "alembic" },
-    { name = "email-validator" },
-    { name = "emails" },
-    { name = "fastapi", extra = ["standard"] },
-    { name = "httpx" },
-    { name = "jinja2" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "pwdlib", extra = ["argon2", "bcrypt"] },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pyjwt" },
-    { name = "python-multipart" },
-    { name = "sentry-sdk", extra = ["fastapi"] },
-    { name = "sqlmodel" },
-    { name = "tenacity" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "coverage" },
-    { name = "mypy" },
-    { name = "prek" },
-    { name = "pytest" },
-    { name = "ruff" },
-    { name = "ty" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "alembic", specifier = ">=1.12.1,<2.0.0" },
-    { name = "email-validator", specifier = ">=2.1.0.post1,<3.0.0.0" },
-    { name = "emails", specifier = ">=0.6,<1.0" },
-    { name = "fastapi", extras = ["standard"], specifier = ">=0.114.2,<1.0.0" },
-    { name = "httpx", specifier = ">=0.25.1,<1.0.0" },
-    { name = "jinja2", specifier = ">=3.1.4,<4.0.0" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.1.13,<4.0.0" },
-    { name = "pwdlib", extras = ["argon2", "bcrypt"], specifier = ">=0.3.0" },
-    { name = "pydantic", specifier = ">2.0" },
-    { name = "pydantic-settings", specifier = ">=2.2.1,<3.0.0" },
-    { name = "pyjwt", specifier = ">=2.8.0,<3.0.0" },
-    { name = "python-multipart", specifier = ">=0.0.7,<1.0.0" },
-    { name = "sentry-sdk", extras = ["fastapi"], specifier = ">=2.0.0,<3.0.0" },
-    { name = "sqlmodel", specifier = ">=0.0.21,<1.0.0" },
-    { name = "tenacity", specifier = ">=8.2.3,<9.0.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "coverage", specifier = ">=7.4.3,<8.0.0" },
-    { name = "mypy", specifier = ">=1.8.0,<2.0.0" },
-    { name = "prek", specifier = ">=0.2.24,<1.0.0" },
-    { name = "pytest", specifier = ">=7.4.3,<8.0.0" },
-    { name = "ruff", specifier = ">=0.2.2,<1.0.0" },
-    { name = "ty", specifier = ">=0.0.25" },
 ]
 
 [[package]]
@@ -2487,4 +2426,65 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a5/8f/aea9c71cc92bf9b6cc0f7f70df8f0b420636b6c96ef4feee1e16f80f75dd/websockets-16.0-pp311-pypy311_pp73-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0298d07ee155e2e9fda5be8a9042200dd2e3bb0b8a38482156576f863a9d457c", size = 176968, upload-time = "2026-01-10T09:23:41.031Z" },
     { url = "https://files.pythonhosted.org/packages/9a/3f/f70e03f40ffc9a30d817eef7da1be72ee4956ba8d7255c399a01b135902a/websockets-16.0-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:a653aea902e0324b52f1613332ddf50b00c06fdaf7e92624fbf8c77c78fa5767", size = 178735, upload-time = "2026-01-10T09:23:42.259Z" },
     { url = "https://files.pythonhosted.org/packages/6f/28/258ebab549c2bf3e64d2b0217b973467394a9cea8c42f70418ca2c5d0d2e/websockets-16.0-py3-none-any.whl", hash = "sha256:1637db62fad1dc833276dded54215f2c7fa46912301a24bd94d45d46a011ceec", size = 171598, upload-time = "2026-01-10T09:23:45.395Z" },
+]
+
+[[package]]
+name = "werefa"
+version = "0.1.0"
+source = { editable = "backend" }
+dependencies = [
+    { name = "alembic" },
+    { name = "email-validator" },
+    { name = "emails" },
+    { name = "fastapi", extra = ["standard"] },
+    { name = "httpx" },
+    { name = "jinja2" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pwdlib", extra = ["argon2", "bcrypt"] },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyjwt" },
+    { name = "python-multipart" },
+    { name = "sentry-sdk", extra = ["fastapi"] },
+    { name = "sqlmodel" },
+    { name = "tenacity" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "coverage" },
+    { name = "mypy" },
+    { name = "prek" },
+    { name = "pytest" },
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.12.1,<2.0.0" },
+    { name = "email-validator", specifier = ">=2.1.0.post1,<3.0.0.0" },
+    { name = "emails", specifier = ">=0.6,<1.0" },
+    { name = "fastapi", extras = ["standard"], specifier = ">=0.114.2,<1.0.0" },
+    { name = "httpx", specifier = ">=0.25.1,<1.0.0" },
+    { name = "jinja2", specifier = ">=3.1.4,<4.0.0" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.1.13,<4.0.0" },
+    { name = "pwdlib", extras = ["argon2", "bcrypt"], specifier = ">=0.3.0" },
+    { name = "pydantic", specifier = ">2.0" },
+    { name = "pydantic-settings", specifier = ">=2.2.1,<3.0.0" },
+    { name = "pyjwt", specifier = ">=2.8.0,<3.0.0" },
+    { name = "python-multipart", specifier = ">=0.0.7,<1.0.0" },
+    { name = "sentry-sdk", extras = ["fastapi"], specifier = ">=2.0.0,<3.0.0" },
+    { name = "sqlmodel", specifier = ">=0.0.21,<1.0.0" },
+    { name = "tenacity", specifier = ">=8.2.3,<9.0.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "coverage", specifier = ">=7.4.3,<8.0.0" },
+    { name = "mypy", specifier = ">=1.8.0,<2.0.0" },
+    { name = "prek", specifier = ">=0.2.24,<1.0.0" },
+    { name = "pytest", specifier = ">=7.4.3,<8.0.0" },
+    { name = "ruff", specifier = ">=0.2.2,<1.0.0" },
+    { name = "ty", specifier = ">=0.0.25" },
 ]

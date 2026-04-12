@@ -1,5 +1,5 @@
 [project]
-name = "app"
+name = "werefa"
 version = "0.1.0"
 description = "Werefa backend API"
 requires-python = ">=3.10,<4.0"
@@ -67,7 +67,7 @@ ignore = [
 keep-runtime-typing = true
 
 [tool.coverage.run]
-source = ["app"]
+source = ["werefa"]
 dynamic_context = "test_function"
 
 [tool.coverage.report]

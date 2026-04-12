@@ -48,18 +48,20 @@ class Settings(BaseSettings):
             self.FRONTEND_HOST
         ]
 
-    PROJECT_NAME: str
+    PROJECT_NAME: str = "Werefa API"
     SENTRY_DSN: HttpUrl | None = None
     POSTGRES_SERVER: str
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str
     POSTGRES_PASSWORD: str = ""
     POSTGRES_DB: str = ""
+    # Set to "require" for Neon, Supabase, RDS, etc. Omit for local Postgres without TLS.
+    POSTGRES_SSLMODE: str | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> PostgresDsn:
-        return PostgresDsn.build(
+        uri = PostgresDsn.build(
             scheme="postgresql+psycopg",
             username=self.POSTGRES_USER,
             password=self.POSTGRES_PASSWORD,
@@ -67,6 +69,9 @@ class Settings(BaseSettings):
             port=self.POSTGRES_PORT,
             path=self.POSTGRES_DB,
         )
+        if self.POSTGRES_SSLMODE:
+            return PostgresDsn(f"{uri!s}?sslmode={self.POSTGRES_SSLMODE}")
+        return uri
 
     SMTP_TLS: bool = True
     SMTP_SSL: bool = False

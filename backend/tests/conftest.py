@@ -4,12 +4,12 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, delete
 
-from app.core.config import settings
-from app.core.db import engine, init_db
-from app.main import app
-from app.models import Item, User
 from tests.utils.user import authentication_token_from_email
 from tests.utils.utils import get_superuser_token_headers
+from werefa.core.config import settings
+from werefa.core.db import engine, init_db
+from werefa.main import app
+from werefa.models import Item, User
 
 
 @pytest.fixture(scope="session", autouse=True)
