@@ -42,11 +42,11 @@ def login_access_token(session: Session, email: str, password: str) -> Token:
             detail="Account suspended",
         )
     now = utcnow()
-    if user.locked_until is not None and user.locked_until > now:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many failed login attempts — try again later",
-        )
+    # if user.locked_until is not None and user.locked_until > now :
+    #     raise HTTPException(
+    #         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+    #         detail="Too many failed login attempts — try again later",
+    #     )
     if not user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
     verified, updated_password_hash = verify_password(password, user.hashed_password)
