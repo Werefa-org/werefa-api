@@ -68,6 +68,10 @@ fastapi run werefa/main.py
 # Run DB prestart (wait, migrate, seed superuser)
 bash scripts/prestart.sh
 
+# Populate demo businesses, users, services, and sample queues (idempotent)
+uv run python scripts/seed_demo_data.py
+uv run python scripts/seed_demo_data.py --reset   # wipe demo-* slugs & *@example.com demo users first
+
 # Lint + type checks
 bash scripts/lint.sh
 
@@ -105,6 +109,8 @@ Important optional variables:
 - `SENTRY_DSN`
 - `REALTIME_REDIS_URL`
 - `SMTP_*` and `EMAILS_FROM_EMAIL` for email delivery
+- `CLOUDINARY_URL` for KYC uploads (`cloudinary://api_key:api_secret@cloud_name` from the Cloudinary dashboard)
+- Optional: `CLOUDINARY_FOLDER` (default `werefa/kyc`)
 
 ## API and Real-Time Notes
 

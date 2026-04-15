@@ -143,9 +143,50 @@ class Settings(BaseSettings):
     MAX_FAILED_LOGIN_ATTEMPTS: int = 5
     LOGIN_LOCKOUT_MINUTES: int = 15
 
-    # US-SYS-00 OTP stub + KYC storage
+    # US-SYS-00 OTP stub + KYC file storage (Cloudinary)
     OTP_TTL_MINUTES: int = 10
-    KYC_DOCUMENTS_DIR: str = "./data/kyc_documents"
+    # Preferred (dashboard → API Keys): cloudinary://<api_key>:<api_secret>@<cloud_name>
+    CLOUDINARY_URL: str | None = None
+    CLOUDINARY_CLOUD_NAME: str = ""
+    CLOUDINARY_API_KEY: str = ""
+    CLOUDINARY_API_SECRET: str = ""
+    CLOUDINARY_FOLDER: str = "werefa/kyc"
+    CLOUDINARY_AVATARS_FOLDER: str = "werefa/avatars"
+    MAX_UPLOAD_BYTES: int = 15 * 1024 * 1024
+    MAX_AVATAR_BYTES: int = 5 * 1024 * 1024
+
+    @staticmethod
+    def parse_cloudinary_url(url: str) -> tuple[str, str, str]:
+        """Parse ``cloudinary://key:secret@cloud_name`` from the dashboard."""
+        raw = url.strip()
+        prefix = "cloudinary://"
+        if not raw.startswith(prefix):
+            raise ValueError("CLOUDINARY_URL must start with cloudinary://")
+        rest = raw[len(prefix) :]
+        creds, sep, cloud_name = rest.rpartition("@")
+        if not sep or not cloud_name:
+            raise ValueError("CLOUDINARY_URL must end with @<cloud_name>")
+        api_key, colon, api_secret = creds.partition(":")
+        if not colon or not api_key or not api_secret:
+            raise ValueError("CLOUDINARY_URL must be cloudinary://<api_key>:<api_secret>@<cloud_name>")
+        return cloud_name, api_key, api_secret
+
+    @model_validator(mode="after")
+    def _apply_cloudinary_url(self) -> Self:
+        if self.CLOUDINARY_URL:
+            name, key, secret = self.parse_cloudinary_url(self.CLOUDINARY_URL)
+            object.__setattr__(self, "CLOUDINARY_CLOUD_NAME", name)
+            object.__setattr__(self, "CLOUDINARY_API_KEY", key)
+            object.__setattr__(self, "CLOUDINARY_API_SECRET", secret)
+        return self
+
+    @property
+    def cloudinary_configured(self) -> bool:
+        return bool(
+            self.CLOUDINARY_CLOUD_NAME
+            and self.CLOUDINARY_API_KEY
+            and self.CLOUDINARY_API_SECRET
+        )
 
     # Optional — when set, push/sms notifiers report "delivered" for wiring tests.
     PUSH_DELIVERY_STUB_ENABLED: bool = False
