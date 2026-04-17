@@ -12,6 +12,14 @@ def _active_statuses() -> tuple[str, ...]:
     return (TicketStatus.waiting.value, TicketStatus.serving.value)
 
 
+def _terminal_statuses() -> tuple[str, ...]:
+    return (
+        TicketStatus.completed.value,
+        TicketStatus.no_show.value,
+        TicketStatus.cancelled.value,
+    )
+
+
 def assert_single_active_ticket(session: Session, user_id: uuid.UUID) -> None:
     statement = (
         select(QueueEntry.id)
@@ -173,7 +181,18 @@ def set_ticket_status(
     if not ticket or ticket.service_item_id != service_item_id:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
+    if ticket.status in _terminal_statuses():
+        raise HTTPException(
+            status_code=400,
+            detail="Ticket is already in a terminal status",
+        )
+
     if new_status == TicketStatus.completed:
+        if ticket.status != TicketStatus.serving.value:
+            raise HTTPException(
+                status_code=400,
+                detail="Only serving tickets can be marked completed",
+            )
         ticket.status = new_status.value
         ticket.completed_at = utcnow()
     elif new_status in (TicketStatus.no_show, TicketStatus.cancelled):

@@ -2,6 +2,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from sqlmodel import col, select
 
 from werefa import crud
 from werefa.api.deps import (
@@ -97,4 +98,58 @@ def add_provider_member(
     session.add(row)
     session.commit()
     session.refresh(row)
+    return row
+
+
+@router.get("/{provider_id}/members", response_model=list[MembershipPublic])
+def list_provider_members(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+) -> Any:
+    ensure_provider_staff(
+        session=session, current_user=current_user, provider_id=provider_id
+    )
+    rows = session.exec(
+        select(ProviderMembership)
+        .where(ProviderMembership.provider_id == provider_id)
+        .order_by(col(ProviderMembership.role), col(ProviderMembership.user_id))
+    ).all()
+    return list(rows)
+
+
+@router.delete(
+    "/{provider_id}/members/{member_user_id}", response_model=MembershipPublic
+)
+def remove_provider_member(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+    member_user_id: uuid.UUID,
+) -> Any:
+    ensure_provider_owner_or_super(
+        session=session, current_user=current_user, provider_id=provider_id
+    )
+    row = crud.get_membership(
+        session=session, provider_id=provider_id, user_id=member_user_id
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Membership not found")
+
+    if row.role == "owner":
+        owner_count = session.exec(
+            select(ProviderMembership)
+            .where(ProviderMembership.provider_id == provider_id)
+            .where(ProviderMembership.role == "owner")
+        ).all()
+        if len(owner_count) <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Provider must keep at least one owner",
+            )
+
+    session.delete(row)
+    session.commit()
     return row
