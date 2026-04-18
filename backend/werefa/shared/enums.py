@@ -62,6 +62,12 @@ class NotificationKind(str, Enum):
     you_are_next = "you_are_next"
     # FR-05 / Phase 11: prompt for GPS ping when entering top-K remotely.
     liveness_ping_request = "liveness_ping_request"
+    # Customer was promoted to serving (staff pressed Call next).
+    now_serving = "now_serving"
+    # Top-K liveness deadline passed without a fresh location ping.
+    liveness_stale = "liveness_stale"
+    # Provider/staff posted in line chat.
+    line_chat_update = "line_chat_update"
 
 
 class NotificationChannel(str, Enum):
