@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_serializer
 from werefa.shared.models import utcnow
 
 BROADCAST_EVENT_TYPE = "broadcast_v1"
+LINE_CHAT_EVENT_TYPE = "line_chat_v1"
 NOTIFY_EVENT_TYPE = "notify_v1"
 
 
@@ -79,6 +80,26 @@ class BroadcastEventV1(BaseModel):
     service_item_id: uuid.UUID | None = None
     body: str = Field(min_length=1, max_length=500)
     severity: Literal["info", "warning", "critical"] = "info"
+    author_role: Literal["owner", "staff"] = "staff"
+    author_label: str = Field(default="Business", min_length=1, max_length=200)
+    occurred_at: datetime
+
+    @field_serializer("occurred_at")
+    def _ser_time(self, v: datetime) -> str:
+        return v.isoformat()
+
+
+class LineChatEventV1(BaseModel):
+    """Wire format for per-line group chat messages."""
+
+    v: int = 1
+    type: Literal["line_chat_v1"] = "line_chat_v1"
+    message_id: uuid.UUID
+    service_item_id: uuid.UUID
+    author_user_id: uuid.UUID
+    body: str = Field(min_length=1, max_length=500)
+    author_role: str = Field(default="seeker", max_length=32)
+    author_label: str = Field(default="Guest", min_length=1, max_length=200)
     occurred_at: datetime
 
     @field_serializer("occurred_at")
@@ -99,7 +120,14 @@ class NotifyEventV1(BaseModel):
     type: Literal["notify_v1"] = "notify_v1"
     ticket_id: uuid.UUID
     service_item_id: uuid.UUID
-    kind: Literal["head_to_counter", "you_are_next"]
+    kind: Literal[
+        "head_to_counter",
+        "you_are_next",
+        "now_serving",
+        "liveness_ping_request",
+        "liveness_stale",
+        "line_chat_update",
+    ]
     position: int = Field(ge=1)
     body: str = Field(min_length=1, max_length=500)
     occurred_at: datetime
