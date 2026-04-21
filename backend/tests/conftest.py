@@ -9,7 +9,7 @@ from tests.utils.utils import get_superuser_token_headers
 from werefa.core.config import settings
 from werefa.core.db import engine, init_db
 from werefa.main import app
-from werefa.models import (
+from werefa.shared.models import (
     Provider,
     ProviderMembership,
     QueueEntry,

@@ -9,12 +9,12 @@ from jwt.exceptions import InvalidTokenError
 from pydantic import ValidationError
 from sqlmodel import Session
 
-from werefa import crud
 from werefa.core import security
 from werefa.core.config import settings
 from werefa.core.db import engine
-from werefa.enums import MembershipRole
-from werefa.models import TokenPayload, User
+from werefa.providers.infrastructure import repo as provider_repo
+from werefa.shared.enums import MembershipRole
+from werefa.shared.models import TokenPayload, User
 
 reusable_oauth2 = OAuth2PasswordBearer(
     tokenUrl=f"{settings.API_V1_STR}/login/access-token"
@@ -70,7 +70,7 @@ def ensure_provider_staff(
 ) -> None:
     if current_user.is_superuser:
         return
-    m = crud.get_membership(
+    m = provider_repo.get_membership(
         session=session, provider_id=provider_id, user_id=current_user.id
     )
     if m is None:
@@ -87,7 +87,7 @@ def ensure_provider_owner_or_super(
 ) -> None:
     if current_user.is_superuser:
         return
-    m = crud.get_membership(
+    m = provider_repo.get_membership(
         session=session, provider_id=provider_id, user_id=current_user.id
     )
     if m is None or m.role != MembershipRole.owner.value:

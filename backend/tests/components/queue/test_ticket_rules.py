@@ -1,10 +1,10 @@
 import pytest
 
-from werefa.components.queue.domain.ticket_rules import (
+from werefa.queue.domain.ticket_rules import (
     is_terminal_status,
     validate_manual_status_change,
 )
-from werefa.enums import TicketStatus
+from werefa.shared.enums import TicketStatus
 
 
 def test_validate_completed_only_from_serving() -> None:
