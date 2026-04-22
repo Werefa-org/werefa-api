@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from werefa.api.deps import SessionDep
 from werefa.core.security import get_password_hash
-from werefa.models import (
+from werefa.shared.models import (
     User,
     UserPublic,
 )

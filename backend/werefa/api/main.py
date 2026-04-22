@@ -1,23 +1,19 @@
 from fastapi import APIRouter
 
-from werefa.api.routes import (
-    login,
-    private,
-    providers,
-    service_items,
-    tickets,
-    users,
-    utils,
-)
+from werefa.api.routes import private, utils
 from werefa.core.config import settings
+from werefa.identity.interface import login_router, users_router
+from werefa.providers.interface import router as providers_router
+from werefa.queue.interface import router as queue_router
+from werefa.service_items.interface import router as service_items_router
 
 api_router = APIRouter()
-api_router.include_router(login.router)
-api_router.include_router(users.router)
+api_router.include_router(login_router.router)
+api_router.include_router(users_router.router)
 api_router.include_router(utils.router)
-api_router.include_router(providers.router)
-api_router.include_router(service_items.router)
-api_router.include_router(tickets.router)
+api_router.include_router(providers_router.router)
+api_router.include_router(service_items_router.router)
+api_router.include_router(queue_router.router)
 
 
 if settings.ENVIRONMENT == "local":

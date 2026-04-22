@@ -4,19 +4,16 @@ from collections.abc import Sequence
 from fastapi import HTTPException, status
 from sqlmodel import Session, col, select
 
-from werefa.enums import TicketSource, TicketStatus
-from werefa.models import Provider, QueueEntry, ServiceItem, User, utcnow
-
-
-def _active_statuses() -> tuple[str, ...]:
-    return (TicketStatus.waiting.value, TicketStatus.serving.value)
+from werefa.queue.domain import ticket_rules
+from werefa.shared.enums import TicketSource, TicketStatus
+from werefa.shared.models import Provider, QueueEntry, ServiceItem, User, utcnow
 
 
 def assert_single_active_ticket(session: Session, user_id: uuid.UUID) -> None:
     statement = (
         select(QueueEntry.id)
         .where(QueueEntry.user_id == user_id)
-        .where(col(QueueEntry.status).in_(_active_statuses()))
+        .where(col(QueueEntry.status).in_(ticket_rules.active_status_values()))
     )
     if session.exec(statement).first():
         raise HTTPException(
@@ -173,16 +170,13 @@ def set_ticket_status(
     if not ticket or ticket.service_item_id != service_item_id:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
-    if new_status == TicketStatus.completed:
-        ticket.status = new_status.value
-        ticket.completed_at = utcnow()
-    elif new_status in (TicketStatus.no_show, TicketStatus.cancelled):
-        ticket.status = new_status.value
-        ticket.completed_at = utcnow()
-    else:
-        raise HTTPException(
-            status_code=400, detail="Use call-next or join flows for other transitions"
-        )
+    try:
+        ticket_rules.validate_manual_status_change(ticket.status, new_status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    ticket.status = new_status.value
+    ticket.completed_at = utcnow()
 
     session.add(ticket)
     session.commit()

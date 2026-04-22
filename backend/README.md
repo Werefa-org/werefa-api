@@ -27,7 +27,7 @@ $ source .venv/bin/activate
 
 Make sure your editor is using the correct Python virtual environment, with the interpreter at `backend/.venv/bin/python`.
 
-Modify or add SQLModel models for data and SQL tables in `./backend/werefa/models.py`, API endpoints in `./backend/werefa/api/`, CRUD (Create, Read, Update, Delete) utils in `./backend/werefa/crud.py`.
+Modify or add SQLModel models for data and SQL tables in `./backend/werefa/shared/models.py`, API endpoints in `./backend/werefa/api/`, and feature repositories in `./backend/werefa/*/infrastructure/`.
 
 ## VS Code
 
@@ -133,7 +133,7 @@ Make sure you create a "revision" of your models and that you "upgrade" your dat
 $ docker compose exec backend bash
 ```
 
-* Alembic is already configured to import your SQLModel models from `./backend/werefa/models.py`.
+* Alembic is already configured to import your SQLModel models from `./backend/werefa/shared/models.py`.
 
 * After changing a model (for example, adding a column), inside the container, create a revision, e.g.:
 

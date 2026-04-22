@@ -6,7 +6,7 @@ from pydantic import EmailStr
 from sqlalchemy import Column, DateTime, Index, Numeric, UniqueConstraint, text
 from sqlmodel import Field, Relationship, SQLModel
 
-from werefa.enums import (
+from werefa.shared.enums import (
     MembershipRole,
     TicketStatus,
     VerificationStatus,

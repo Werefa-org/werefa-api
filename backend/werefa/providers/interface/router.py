@@ -3,7 +3,6 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from werefa import crud
 from werefa.api.deps import (
     CurrentUser,
     SessionDep,
@@ -11,15 +10,13 @@ from werefa.api.deps import (
     ensure_provider_owner_or_super,
     ensure_provider_staff,
 )
-from werefa.models import (
+from werefa.providers.application import service as provider_service
+from werefa.shared.models import (
     MembershipCreate,
     MembershipPublic,
-    Provider,
     ProviderCreate,
-    ProviderMembership,
     ProviderPublic,
     ProviderUpdate,
-    User,
 )
 
 router = APIRouter(prefix="/providers", tags=["providers"])
@@ -29,12 +26,12 @@ router = APIRouter(prefix="/providers", tags=["providers"])
 def create_provider(
     *, session: SessionDep, _admin: SuperUser, body: ProviderCreate
 ) -> Any:
-    return crud.create_provider(session=session, body=body)
+    return provider_service.create_provider(session, body)
 
 
 @router.get("/by-slug/{slug}", response_model=ProviderPublic)
 def read_provider_by_slug(*, session: SessionDep, slug: str) -> Any:
-    p = crud.get_provider_by_slug(session=session, slug=slug)
+    p = provider_service.get_provider_by_slug(session, slug)
     if not p:
         raise HTTPException(status_code=404, detail="Provider not found")
     return p
@@ -42,7 +39,7 @@ def read_provider_by_slug(*, session: SessionDep, slug: str) -> Any:
 
 @router.get("/{provider_id}", response_model=ProviderPublic)
 def read_provider(*, session: SessionDep, provider_id: uuid.UUID) -> Any:
-    p = session.get(Provider, provider_id)
+    p = provider_service.get_provider(session, provider_id)
     if not p:
         raise HTTPException(status_code=404, detail="Provider not found")
     return p
@@ -59,15 +56,7 @@ def update_provider(
     ensure_provider_staff(
         session=session, current_user=current_user, provider_id=provider_id
     )
-    p = session.get(Provider, provider_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="Provider not found")
-    data = body.model_dump(exclude_unset=True)
-    p.sqlmodel_update(data)
-    session.add(p)
-    session.commit()
-    session.refresh(p)
-    return p
+    return provider_service.update_provider(session, provider_id, body)
 
 
 @router.post("/{provider_id}/members", response_model=MembershipPublic)
@@ -81,20 +70,33 @@ def add_provider_member(
     ensure_provider_owner_or_super(
         session=session, current_user=current_user, provider_id=provider_id
     )
-    if session.get(Provider, provider_id) is None:
-        raise HTTPException(status_code=404, detail="Provider not found")
-    if session.get(User, body.user_id) is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    if crud.get_membership(
-        session=session, provider_id=provider_id, user_id=body.user_id
-    ):
-        raise HTTPException(status_code=409, detail="User is already a member")
-    row = ProviderMembership(
-        provider_id=provider_id,
-        user_id=body.user_id,
-        role=body.role.value,
+    return provider_service.add_provider_member(session, provider_id, body)
+
+
+@router.get("/{provider_id}/members", response_model=list[MembershipPublic])
+def list_provider_members(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+) -> Any:
+    ensure_provider_staff(
+        session=session, current_user=current_user, provider_id=provider_id
     )
-    session.add(row)
-    session.commit()
-    session.refresh(row)
-    return row
+    return provider_service.list_provider_members(session, provider_id)
+
+
+@router.delete(
+    "/{provider_id}/members/{member_user_id}", response_model=MembershipPublic
+)
+def remove_provider_member(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+    member_user_id: uuid.UUID,
+) -> Any:
+    ensure_provider_owner_or_super(
+        session=session, current_user=current_user, provider_id=provider_id
+    )
+    return provider_service.remove_provider_member(session, provider_id, member_user_id)

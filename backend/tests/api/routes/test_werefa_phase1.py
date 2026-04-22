@@ -6,9 +6,9 @@ from sqlmodel import Session
 
 from tests.utils.user import user_authentication_headers
 from tests.utils.utils import random_email, random_lower_string
-from werefa import crud
 from werefa.core.config import settings
-from werefa.models import UserCreate
+from werefa.identity.infrastructure import repo as identity_repo
+from werefa.shared.models import UserCreate
 
 
 def test_provider_queue_flow(
@@ -17,7 +17,7 @@ def test_provider_queue_flow(
     superuser_token_headers: dict[str, str],
     normal_user_token_headers: dict[str, str],
 ) -> None:
-    su = crud.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
+    su = identity_repo.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
     assert su is not None
     slug = f"demo-{uuid.uuid4().hex[:8]}"
 
@@ -133,13 +133,13 @@ def test_private_queue_access_code(
     db: Session,
     superuser_token_headers: dict[str, str],
 ) -> None:
-    su = crud.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
+    su = identity_repo.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
     assert su is not None
     slug = f"priv-{uuid.uuid4().hex[:8]}"
 
     email = random_email()
     password = random_lower_string()
-    crud.create_user(
+    identity_repo.create_user(
         session=db,
         user_create=UserCreate(email=email, password=password),
     )
@@ -203,3 +203,121 @@ def test_provider_forbidden_for_non_staff(
         json={"is_paused": True},
     )
     assert r.status_code == 403
+
+
+def test_ticket_status_transition_rules(
+    client: TestClient,
+    db: Session,
+    superuser_token_headers: dict[str, str],
+) -> None:
+    email = random_email()
+    password = random_lower_string()
+    identity_repo.create_user(
+        session=db,
+        user_create=UserCreate(email=email, password=password),
+    )
+    fresh_headers = user_authentication_headers(
+        client=client, email=email, password=password
+    )
+
+    su = identity_repo.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
+    assert su is not None
+
+    slug = f"trans-{uuid.uuid4().hex[:8]}"
+    r = client.post(
+        f"{settings.API_V1_STR}/providers/",
+        headers=superuser_token_headers,
+        json={"slug": slug, "biz_name": "Transitions", "owner_user_id": str(su.id)},
+    )
+    provider_id = r.json()["id"]
+
+    r = client.post(
+        f"{settings.API_V1_STR}/providers/{provider_id}/services/",
+        headers=superuser_token_headers,
+        json={"name": "Consult", "avg_duration_minutes": 20, "price": "30.00"},
+    )
+    sid = r.json()["id"]
+
+    r = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/join",
+        headers=fresh_headers,
+        json={},
+    )
+    tid = r.json()["id"]
+
+    r = client.patch(
+        f"{settings.API_V1_STR}/service-items/{sid}/tickets/{tid}/status",
+        headers=superuser_token_headers,
+        json={"status": "completed"},
+    )
+    assert r.status_code == 400
+
+    r = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/call-next",
+        headers=superuser_token_headers,
+    )
+    assert r.status_code == 200
+
+    r = client.patch(
+        f"{settings.API_V1_STR}/service-items/{sid}/tickets/{tid}/status",
+        headers=superuser_token_headers,
+        json={"status": "completed"},
+    )
+    assert r.status_code == 200
+
+    r = client.patch(
+        f"{settings.API_V1_STR}/service-items/{sid}/tickets/{tid}/status",
+        headers=superuser_token_headers,
+        json={"status": "no_show"},
+    )
+    assert r.status_code == 400
+
+
+def test_provider_membership_list_and_remove(
+    client: TestClient,
+    db: Session,
+    superuser_token_headers: dict[str, str],
+) -> None:
+    su = identity_repo.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
+    assert su is not None
+
+    email = random_email()
+    password = random_lower_string()
+    new_user = identity_repo.create_user(
+        session=db,
+        user_create=UserCreate(email=email, password=password),
+    )
+
+    slug = f"member-{uuid.uuid4().hex[:8]}"
+    r = client.post(
+        f"{settings.API_V1_STR}/providers/",
+        headers=superuser_token_headers,
+        json={"slug": slug, "biz_name": "Membership", "owner_user_id": str(su.id)},
+    )
+    provider_id = r.json()["id"]
+
+    r = client.post(
+        f"{settings.API_V1_STR}/providers/{provider_id}/members",
+        headers=superuser_token_headers,
+        json={"user_id": str(new_user.id), "role": "staff"},
+    )
+    assert r.status_code == 200
+
+    r = client.get(
+        f"{settings.API_V1_STR}/providers/{provider_id}/members",
+        headers=superuser_token_headers,
+    )
+    assert r.status_code == 200
+    assert len(r.json()) >= 2
+
+    r = client.delete(
+        f"{settings.API_V1_STR}/providers/{provider_id}/members/{new_user.id}",
+        headers=superuser_token_headers,
+    )
+    assert r.status_code == 200
+
+    r = client.delete(
+        f"{settings.API_V1_STR}/providers/{provider_id}/members/{su.id}",
+        headers=superuser_token_headers,
+    )
+    assert r.status_code == 400

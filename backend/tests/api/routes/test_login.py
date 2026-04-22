@@ -8,8 +8,8 @@ from tests.utils.user import user_authentication_headers
 from tests.utils.utils import random_email, random_lower_string
 from werefa.core.config import settings
 from werefa.core.security import get_password_hash, verify_password
-from werefa.crud import create_user
-from werefa.models import User, UserCreate
+from werefa.identity.infrastructure.repo import create_user
+from werefa.shared.models import User, UserCreate
 from werefa.utils import generate_password_reset_token
 
 
