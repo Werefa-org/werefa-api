@@ -2,11 +2,32 @@ import uuid
 from collections.abc import Sequence
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from werefa.queue.domain import ticket_rules
 from werefa.shared.enums import TicketSource, TicketStatus
 from werefa.shared.models import Provider, QueueEntry, ServiceItem, User, utcnow
+
+
+def _is_one_active_user_unique_violation(err: IntegrityError) -> bool:
+    """
+    Distinguish partial unique (one active app ticket per user) from other integrity errors.
+    """
+    orig = err.orig
+    if orig is not None:
+        if getattr(orig, "pgcode", None) == "23505":
+            return True
+        s = str(orig)
+        if "ix_queue_entry_one_active_user" in s:
+            return True
+    combined = f"{err} {orig or ''}"
+    if "ix_queue_entry_one_active_user" in combined:
+        return True
+    low = combined.lower()
+    if "unique" in low and "queue_entry" in low:
+        return True
+    return False
 
 
 def assert_single_active_ticket(session: Session, user_id: uuid.UUID) -> None:
@@ -74,7 +95,17 @@ def join_queue_remote(
         guest_name=None,
     )
     session.add(ticket)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as err:
+        session.rollback()
+        # Races: application check and partial unique index ix_queue_entry_one_active_user
+        if _is_one_active_user_unique_violation(err):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="You already have an active ticket in a queue",
+            ) from None
+        raise
     session.refresh(ticket)
     return ticket
 
