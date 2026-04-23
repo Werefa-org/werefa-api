@@ -133,32 +133,48 @@ class WebSocketNotifier:
 
 
 class EmailNotifier:
-    """Stub email notifier.
-
-    The full SMTP path lives behind ``settings.emails_enabled``. To keep
-    the request hot path snappy and the test surface deterministic, we
-    *defer* the actual send to a future phase and just report whether
-    we *could* have delivered.
-    """
+    """SMTP delivery for queue alerts (FR-07)."""
 
     channel = NotificationChannel.email
 
     def send(self, *, user: User, payload: NotificationPayload) -> bool:
         from werefa.core.config import settings
+        from werefa.utils import (
+            generate_queue_notification_email,
+            queue_notification_subject,
+            send_email,
+            ticket_deep_link,
+        )
 
         if not settings.emails_enabled:
             return False
-        # Deliberately a no-op for now: spec calls for an extensible
-        # adapter, not a finished SMTP integration in Phase 10. Tests
-        # asserting "preferred channel was tried first" can monkeypatch
-        # this implementation.
-        logger.info(
-            "notification_email_dispatched_stub",
-            extra={
-                "user_id": str(user.id),
-                "kind": payload.kind.value,
-            },
+        if not user.email:
+            return False
+        ticket_link = (
+            ticket_deep_link(str(payload.ticket_id))
+            if payload.ticket_id is not None
+            else None
         )
+        subject = queue_notification_subject(payload.kind.value)
+        email_data = generate_queue_notification_email(
+            email_to=user.email,
+            subject=subject,
+            body=payload.body,
+            ticket_link=ticket_link,
+            position=payload.position,
+        )
+        try:
+            send_email(
+                email_to=user.email,
+                subject=email_data.subject,
+                html_content=email_data.html_content,
+            )
+        except Exception:
+            logger.exception(
+                "notification_email_send_failed",
+                extra={"user_id": str(user.id), "kind": payload.kind.value},
+            )
+            return False
         return True
 
 

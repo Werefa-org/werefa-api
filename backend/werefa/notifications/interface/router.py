@@ -6,10 +6,12 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from werefa.api.deps import CurrentUser, SessionDep
+from werefa.identity.application import service as identity_service
 from werefa.notifications.application import service as notifications_service
 from werefa.shared.models import (
     NotificationPrefsUpdate,
     NotificationPublic,
+    NotificationUnreadCount,
     NotificationsPublic,
     UserPublic,
 )
@@ -34,6 +36,19 @@ def mark_my_notification_read(
     return NotificationPublic.model_validate(row)
 
 
+@router.get("/notifications/unread-count", response_model=NotificationUnreadCount)
+def my_notification_unread_count(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+) -> Any:
+    return NotificationUnreadCount(
+        unread_count=notifications_service.count_unread_notifications(
+            session, user=current_user
+        )
+    )
+
+
 @router.get("/notifications", response_model=NotificationsPublic)
 def list_my_notifications(
     *,
@@ -45,8 +60,11 @@ def list_my_notifications(
     rows, total = notifications_service.list_user_notifications(
         session, user=current_user, limit=limit, offset=offset
     )
+    unread = notifications_service.count_unread_notifications(
+        session, user=current_user
+    )
     data = [NotificationPublic.model_validate(r) for r in rows]
-    return NotificationsPublic(data=data, count=total)
+    return NotificationsPublic(data=data, count=total, unread_count=unread)
 
 
 @prefs_router.patch("/me/notifications", response_model=UserPublic)
@@ -56,6 +74,8 @@ def update_my_notification_prefs(
     current_user: CurrentUser,
     body: NotificationPrefsUpdate,
 ) -> Any:
-    return notifications_service.update_prefs(
-        session, user=current_user, body=body
+    return identity_service.to_user_public(
+        notifications_service.update_prefs(
+            session, user=current_user, body=body
+        )
     )

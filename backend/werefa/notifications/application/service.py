@@ -10,6 +10,7 @@ from sqlalchemy import func
 from sqlmodel import Session, col, select
 
 from werefa.core.config import settings
+from werefa.core.db import engine
 from werefa.notifications.domain.triggers import decide_alert
 from werefa.notifications.notifier import (
     NotificationPayload,
@@ -31,6 +32,19 @@ from werefa.shared.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Queue-critical alerts always attempt email when it is in the user's
+# prefs, even if websocket already delivered (in-app + inbox + mail).
+EMAIL_COPY_KINDS: frozenset[NotificationKind] = frozenset(
+    {
+        NotificationKind.head_to_counter,
+        NotificationKind.you_are_next,
+        NotificationKind.now_serving,
+        NotificationKind.liveness_ping_request,
+        NotificationKind.liveness_stale,
+        NotificationKind.line_chat_update,
+    }
+)
 
 # Module-level registry mutable for tests via ``set_registry``. The
 # default registry is rebuilt lazily so importing this module from a
@@ -98,6 +112,34 @@ def _persist_ledger(
     return row
 
 
+def _try_email_copy(
+    registry: dict[NotificationChannel, Notifier],
+    *,
+    user: User,
+    payload: NotificationPayload,
+) -> None:
+    """Send email without changing the primary ledger channel."""
+    from werefa.core.config import settings
+
+    if not settings.emails_enabled:
+        return
+    if payload.kind not in EMAIL_COPY_KINDS:
+        return
+    prefs = _user_prefs(user)
+    if NotificationChannel.email not in prefs:
+        return
+    notifier = registry.get(NotificationChannel.email)
+    if notifier is None:
+        return
+    try:
+        notifier.send(user=user, payload=payload)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "notification_email_copy_failed",
+            extra={"kind": payload.kind.value, "user_id": str(user.id)},
+        )
+
+
 def dispatch(
     session: Session,
     *,
@@ -113,10 +155,16 @@ def dispatch(
     payload = payload.with_default_time()
     registry = get_registry()
     prefs = _user_prefs(user)
+    defer_email = (
+        payload.kind in EMAIL_COPY_KINDS
+        and NotificationChannel.email in prefs
+    )
 
     delivered_via: NotificationChannel | None = None
     skipped: list[NotificationChannel] = []
     for channel in prefs:
+        if defer_email and channel == NotificationChannel.email:
+            continue
         notifier = registry.get(channel)
         if notifier is None:
             continue
@@ -139,7 +187,7 @@ def dispatch(
         skipped[-1] if skipped else NotificationChannel.logger
     )
 
-    return _persist_ledger(
+    row = _persist_ledger(
         session,
         user_id=user.id,
         ticket_id=payload.ticket_id,
@@ -149,6 +197,89 @@ def dispatch(
         status_value=final_status,
         position=payload.position,
     )
+    if defer_email:
+        _try_email_copy(registry, user=user, payload=payload)
+    return row
+
+
+def notify_ticket_now_serving(
+    session: Session,
+    *,
+    ticket: QueueEntry,
+    service_item_id: uuid.UUID,
+) -> Notification | None:
+    """Alert the customer whose ticket was just called to the counter."""
+    if ticket.user_id is None:
+        return None
+    user = session.get(User, ticket.user_id)
+    if user is None or not user.is_active:
+        return None
+    return dispatch(
+        session,
+        user=user,
+        payload=NotificationPayload(
+            kind=NotificationKind.now_serving,
+            body="You're being served now — please come to the counter.",
+            ticket_id=ticket.id,
+            service_item_id=service_item_id,
+            position=1,
+        ),
+    )
+
+
+def notify_line_chat_staff_message(
+    session: Session,
+    *,
+    service_item_id: uuid.UUID,
+    body_text: str,
+    author_label: str,
+    author_user_id: uuid.UUID,
+) -> list[Notification]:
+    """Inbox alerts for customers on the line when staff posts in chat."""
+    rows = session.exec(
+        select(QueueEntry)
+        .where(QueueEntry.service_item_id == service_item_id)
+        .where(
+            col(QueueEntry.status).in_(
+                (TicketStatus.waiting.value, TicketStatus.serving.value)
+            )
+        )
+        .where(col(QueueEntry.user_id).is_not(None))
+    ).all()
+    preview = body_text.strip()
+    if len(preview) > 160:
+        preview = preview[:157] + "..."
+    message_body = f"{author_label}: {preview}"
+    fired: list[Notification] = []
+    for ticket in rows:
+        if ticket.user_id is None or ticket.user_id == author_user_id:
+            continue
+        user = session.get(User, ticket.user_id)
+        if user is None or not user.is_active:
+            continue
+        result = dispatch(
+            session,
+            user=user,
+            payload=NotificationPayload(
+                kind=NotificationKind.line_chat_update,
+                body=message_body,
+                ticket_id=ticket.id,
+                service_item_id=service_item_id,
+            ),
+        )
+        if result is not None:
+            fired.append(result)
+    return fired
+
+
+def count_unread_notifications(session: Session, *, user: User) -> int:
+    raw = session.exec(
+        select(func.count())
+        .select_from(Notification)
+        .where(Notification.user_id == user.id)
+        .where(col(Notification.read_at).is_(None))
+    ).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
 
 
 def _ticket_position(session: Session, ticket: QueueEntry) -> int:
@@ -202,6 +333,8 @@ def evaluate_smart_alerts_for_service_line(
 
     fired: list[Notification] = []
     for ticket in rows:
+        if ticket.status == TicketStatus.serving.value:
+            continue
         pos = _ticket_position(session, ticket)
         if pos < 1:
             continue
@@ -247,6 +380,27 @@ def evaluate_smart_alerts_for_service_line(
         notify_queue_subscribers(session, service_item_id, reason="liveness")
 
     return fired
+
+
+def run_evaluate_smart_alerts_for_service_line(service_item_id: uuid.UUID) -> None:
+    """Background-task entry point: opens its own DB session.
+
+    Never pass the request-scoped ``Session`` into ``BackgroundTasks`` — it is
+    closed when the HTTP response finishes, which leaves pooled connections in
+    a bad state and surfaces as intermittent 500s on position pings.
+    """
+    try:
+        from sqlmodel import Session
+
+        with Session(engine) as session:
+            evaluate_smart_alerts_for_service_line(
+                session, service_item_id=service_item_id
+            )
+    except Exception:
+        logger.exception(
+            "Smart alerts failed after position ping",
+            extra={"service_item_id": str(service_item_id)},
+        )
 
 
 def mark_notification_read(
@@ -315,8 +469,13 @@ def reset_prefs_default() -> list[str]:
 __all__ = [
     "NotificationChannel",
     "NotificationKind",
+    "EMAIL_COPY_KINDS",
+    "count_unread_notifications",
     "dispatch",
     "evaluate_smart_alerts_for_service_line",
+    "notify_line_chat_staff_message",
+    "notify_ticket_now_serving",
+    "run_evaluate_smart_alerts_for_service_line",
     "get_registry",
     "list_user_notifications",
     "mark_notification_read",
