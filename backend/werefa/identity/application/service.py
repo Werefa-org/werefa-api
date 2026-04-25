@@ -1,11 +1,12 @@
 import uuid
 from datetime import timedelta
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException, UploadFile, status
 from sqlmodel import Session, col, func, select
 
-from werefa.core import security
+from werefa.core import cloudinary_storage, security
 from werefa.core.config import settings
+from werefa.core.image_upload import read_image_upload
 from werefa.core.security import get_password_hash, verify_password
 from werefa.identity.infrastructure import repo as identity_repo
 from werefa.shared.enums import TicketStatus, UserType
@@ -18,6 +19,7 @@ from werefa.shared.models import (
     UserCreate,
     UserRegister,
     UsersPublic,
+    UserPublic,
     UserUpdate,
     UserUpdateMe,
     utcnow,
@@ -29,6 +31,39 @@ from werefa.utils import (
     send_email,
     verify_password_reset_token,
 )
+
+
+def profile_image_url_for_user(user: User) -> str | None:
+    if not user.profile_image_public_id:
+        return None
+    return cloudinary_storage.public_image_url(
+        public_id=user.profile_image_public_id,
+        resource_type=user.profile_image_resource_type or "image",
+    )
+
+
+def to_user_public(user: User) -> UserPublic:
+    return UserPublic.model_validate(
+        user,
+        update={"profile_image_url": profile_image_url_for_user(user)},
+    )
+
+
+async def upload_user_profile_image(
+    session: Session, current_user: User, upload: UploadFile
+) -> UserPublic:
+    data, ext = await read_image_upload(upload)
+    stored = cloudinary_storage.upload_public_image(
+        data=data,
+        folder=f"{settings.CLOUDINARY_AVATARS_FOLDER}/users/{current_user.id}",
+        asset_name=f"avatar.{ext}",
+    )
+    current_user.profile_image_public_id = stored.public_id
+    current_user.profile_image_resource_type = stored.resource_type
+    session.add(current_user)
+    session.commit()
+    session.refresh(current_user)
+    return to_user_public(current_user)
 
 
 def login_access_token(session: Session, email: str, password: str) -> Token:
