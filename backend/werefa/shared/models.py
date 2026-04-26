@@ -132,6 +132,19 @@ class ProviderPublic(ProviderBase):
     created_at: datetime | None = None
 
 
+class ProviderDiscoveryPublic(ProviderPublic):
+    distance_m: int | None = None
+    active_tickets: int = 0
+    serving_tickets: int = 0
+    estimated_wait_minutes: int | None = None
+    load_factor: str | None = Field(default=None, max_length=16)
+
+
+class ProviderDiscoveriesPublic(SQLModel):
+    data: list[ProviderDiscoveryPublic]
+    count: int
+
+
 # --- Membership ---
 
 

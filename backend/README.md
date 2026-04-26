@@ -101,6 +101,54 @@ The tests run with Pytest, modify and add tests to `./backend/tests/`.
 
 If you use GitHub Actions the tests will run automatically.
 
+## Real-time queue streams (Phase 3)
+
+Queue updates are available through WebSockets under `/api/v1/ws`:
+
+- Service line stream: `/service-items/{service_item_id}/stream?token=<access_token>`
+  - Access: provider staff or superuser for that provider.
+- Ticket stream: `/tickets/{ticket_id}/stream?token=<access_token>`
+  - Access: ticket owner, provider staff, or superuser.
+
+Event payload (`QueueEventV1`) includes:
+
+- `v`
+- `type`
+- `service_item_id`
+- `ticket_id`
+- `status`
+- `position`
+- `occurred_at`
+- `reason`
+
+For multi-worker deployments, set `REALTIME_REDIS_URL` so WebSocket fan-out is broadcast across workers through Redis pub/sub.
+
+## Provider discovery (Phase 4 start)
+
+Public discovery endpoint:
+
+- `GET /api/v1/providers/discover`
+
+Query params:
+
+- `latitude` (required)
+- `longitude` (required)
+- `radius_m` (optional)
+- `query` (optional text filter on provider name/slug)
+- `include_private` (default `false`)
+- `only_open` (default `true`)
+- `include_paused` (default `false`)
+- `limit` (default `20`)
+- `offset` (default `0`)
+
+Results are distance-sorted (nearest first) and include:
+
+- `distance_m`
+- `active_tickets`
+- `serving_tickets`
+- `estimated_wait_minutes`
+- `load_factor` (`low` / `medium` / `high`)
+
 ### Test running stack
 
 If your stack is already up and you just want to run the tests, you can use:
