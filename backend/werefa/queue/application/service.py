@@ -63,6 +63,7 @@ def join_queue_remote(
     service_item_id: uuid.UUID,
     user: User,
     access_code: str | None,
+    vip_code: str | None = None,
     latitude: float | None = None,
     longitude: float | None = None,
     invite_token: str | None = None,
@@ -75,12 +76,18 @@ def join_queue_remote(
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
 
-    if not provider.is_open or provider.is_paused:
+    if not provider.is_open:
         raise HTTPException(
-            status_code=400, detail="Provider is not accepting joins right now"
+            status_code=400, detail="This business is currently closed"
         )
 
-    if provider.is_private:
+    if svc.is_paused or provider.is_paused:
+        raise HTTPException(
+            status_code=400, detail="This service is not accepting remote joins right now"
+        )
+
+    is_private = svc.is_private or provider.is_private
+    if is_private:
         invite_ok = join_invite_service.assert_invite_valid_for_service(
             session, token=invite_token, service_item_id=service_item_id
         )
@@ -134,6 +141,14 @@ def join_queue_remote(
         TicketSource.qr_scan.value if invite_ok else TicketSource.remote_app.value
     )
 
+    # VIP priority: code must match and service must have VIP enabled
+    is_vip = (
+        svc.allow_vip
+        and bool(vip_code)
+        and bool(svc.vip_code)
+        and vip_code.strip().upper() == svc.vip_code.strip().upper()
+    )
+
     num = svc.next_ticket_number
     svc.next_ticket_number = num + 1
     session.add(svc)
@@ -145,6 +160,7 @@ def join_queue_remote(
         status=TicketStatus.waiting.value,
         source=source,
         guest_name=None,
+        priority=1 if is_vip else 0,
     )
     session.add(ticket)
     try:
@@ -180,6 +196,7 @@ def join_queue_walk_in(
     *,
     service_item_id: uuid.UUID,
     guest_name: str | None,
+    is_vip: bool = False,
 ) -> QueueEntry:
     svc = get_service_for_update(session, service_item_id)
     if not svc.is_active:
@@ -209,6 +226,7 @@ def join_queue_walk_in(
         status=TicketStatus.waiting.value,
         source=TicketSource.kiosk_walk_in.value,
         guest_name=guest_name,
+        priority=1 if is_vip else 0,
     )
     session.add(ticket)
     session.commit()
@@ -233,7 +251,7 @@ def list_queue_entries(
     statement = (
         select(QueueEntry)
         .where(QueueEntry.service_item_id == service_item_id)
-        .order_by(col(QueueEntry.joined_at))
+        .order_by(col(QueueEntry.priority).desc(), col(QueueEntry.joined_at))
     )
     return session.exec(statement).all()
 
@@ -264,7 +282,7 @@ def call_next_transition(
         select(QueueEntry)
         .where(QueueEntry.service_item_id == service_item_id)
         .where(QueueEntry.status == TicketStatus.waiting.value)
-        .order_by(col(QueueEntry.joined_at))
+        .order_by(col(QueueEntry.priority).desc(), col(QueueEntry.joined_at))
     ).first()
 
     if not nxt:
@@ -451,5 +469,27 @@ def recall_last_completed(session: Session, service_item_id: uuid.UUID) -> Queue
                 ),
             ) from None
         raise
+    session.refresh(ticket)
+    return ticket
+
+
+def set_ticket_priority(
+    session: Session,
+    *,
+    service_item_id: uuid.UUID,
+    ticket_id: uuid.UUID,
+    priority: int,
+) -> QueueEntry:
+    """Staff can manually set VIP (priority=1) or remove it (priority=0)."""
+    ticket = session.get(QueueEntry, ticket_id)
+    if ticket is None or ticket.service_item_id != service_item_id:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if ticket.status not in (TicketStatus.waiting.value, TicketStatus.serving.value):
+        raise HTTPException(
+            status_code=400, detail="Can only change priority on active tickets"
+        )
+    ticket.priority = priority
+    session.add(ticket)
+    session.commit()
     session.refresh(ticket)
     return ticket

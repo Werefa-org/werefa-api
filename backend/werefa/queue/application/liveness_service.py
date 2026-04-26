@@ -116,6 +116,23 @@ def sync_liveness_for_service_line(
             ):
                 ticket.liveness_state = LivenessState.flagged.value
                 session.add(ticket)
+                user = session.get(User, ticket.user_id)
+                if user is not None:
+                    notifications_service.dispatch(
+                        session,
+                        user=user,
+                        payload=NotificationPayload(
+                            kind=NotificationKind.liveness_stale,
+                            body=(
+                                "We have not received a recent location update. "
+                                "Open your ticket and share your location so you "
+                                "do not lose your spot."
+                            ),
+                            ticket_id=ticket.id,
+                            service_item_id=service_item_id,
+                            position=pos,
+                        ),
+                    )
                 dirty = True
 
     return dirty
