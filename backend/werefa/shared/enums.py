@@ -1,6 +1,14 @@
 from enum import Enum
 
 
+class UserType(str, Enum):
+    """Account intent: customers use queues; providers run businesses; admin is platform staff."""
+
+    customer = "customer"
+    provider = "provider"
+    admin = "admin"
+
+
 class VerificationStatus(str, Enum):
     pending = "pending"
     verified = "verified"

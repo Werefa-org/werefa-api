@@ -1,16 +1,16 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, status
 
 from werefa.api.deps import (
     CurrentUser,
     SessionDep,
-    SuperUser,
     ensure_provider_owner_or_super,
     ensure_provider_staff,
 )
 from werefa.providers.application import service as provider_service
+from werefa.shared.enums import UserType
 from werefa.shared.models import (
     MembershipCreate,
     MembershipPublic,
@@ -53,9 +53,31 @@ def discover_providers(
 
 @router.post("/", response_model=ProviderPublic)
 def create_provider(
-    *, session: SessionDep, _admin: SuperUser, body: ProviderCreate
+    *, session: SessionDep, current_user: CurrentUser, body: ProviderCreate
 ) -> Any:
-    return provider_service.create_provider(session, body)
+    if current_user.is_superuser:
+        effective = body
+    elif current_user.user_type == UserType.provider.value:
+        owner_id = (
+            body.owner_user_id
+            if body.owner_user_id is not None
+            else current_user.id
+        )
+        if owner_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Provider accounts can only create businesses they will own "
+                    "themselves"
+                ),
+            )
+        effective = body.model_copy(update={"owner_user_id": current_user.id})
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only provider or administrator accounts can create a business",
+        )
+    return provider_service.create_provider(session, effective)
 
 
 @router.get("/by-slug/{slug}", response_model=ProviderPublic)

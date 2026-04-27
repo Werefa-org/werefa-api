@@ -21,6 +21,7 @@ def test_get_users_superuser_me(
     assert current_user["is_active"] is True
     assert current_user["is_superuser"]
     assert current_user["email"] == settings.FIRST_SUPERUSER
+    assert current_user["user_type"] == "admin"
 
 
 def test_get_users_normal_user_me(
@@ -329,6 +330,7 @@ def test_register_user(client: TestClient, db: Session) -> None:
     created_user = r.json()
     assert created_user["email"] == username
     assert created_user["full_name"] == full_name
+    assert created_user["user_type"] == "customer"
 
     user_query = select(User).where(User.email == username)
     user_db = db.exec(user_query).first()
