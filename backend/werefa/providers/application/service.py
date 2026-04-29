@@ -3,8 +3,14 @@ import uuid
 from fastapi import HTTPException
 from sqlmodel import Session, col, select
 
+from werefa.core.config import settings
 from werefa.providers.domain import membership_rules
 from werefa.providers.infrastructure import repo as provider_repo
+from werefa.queue.application.ewt import (
+    provider_ewt_minutes,
+    round_minutes,
+    service_line_ewt_minutes,
+)
 from werefa.shared.enums import MembershipRole
 from werefa.shared.models import (
     MembershipCreate,
@@ -14,7 +20,9 @@ from werefa.shared.models import (
     ProviderDiscoveryPublic,
     ProviderMembership,
     ProviderUpdate,
+    ServiceItem,
     User,
+    utcnow,
 )
 
 
@@ -142,9 +150,10 @@ def discover_providers(
         offset=offset,
     )
     data: list[ProviderDiscoveryPublic] = []
+    now = utcnow()
     for p, distance in pairs:
         active_tickets, serving_tickets, estimated_wait_minutes = (
-            provider_repo.provider_queue_hints(session=session, provider_id=p.id)
+            _compute_provider_load_and_ewt(session=session, provider=p, now=now)
         )
         if active_tickets <= 5:
             load_factor = "low"
@@ -172,3 +181,54 @@ def discover_providers(
             )
         )
     return ProviderDiscoveriesPublic(data=data, count=len(data))
+
+
+def _compute_provider_load_and_ewt(
+    *,
+    session: Session,
+    provider: Provider,
+    now,
+) -> tuple[int, int, int | None]:
+    """Compose the active-ticket counts with the EWT WMA per service line.
+
+    Returns ``(active_total, serving_total, estimated_wait_minutes)`` so
+    callers can stay shaped like the legacy ``provider_queue_hints``.
+    """
+    active_total, serving_total, services, waiting_per_service = (
+        provider_repo.provider_active_ticket_counts(
+            session=session, provider_id=provider.id
+        )
+    )
+    if not services:
+        return active_total, serving_total, None
+
+    active_services: list[ServiceItem] = [s for s in services if s.is_active]
+    if not active_services:
+        return active_total, serving_total, None
+
+    service_line_ewts: list[float | None] = []
+    for svc in active_services:
+        waiting_count = waiting_per_service.get(svc.id, 0)
+        if waiting_count <= 0:
+            continue
+        samples = provider_repo.list_completed_samples_for_service(
+            session=session,
+            service_item_id=svc.id,
+            limit=settings.EWT_HISTORY_LIMIT,
+        )
+        line_ewt = service_line_ewt_minutes(
+            samples=samples,
+            waiting_count=waiting_count,
+            fallback_avg_min=svc.avg_duration_minutes,
+            now=now,
+            half_life_min=settings.EWT_HALF_LIFE_MIN,
+            min_samples=settings.EWT_MIN_SAMPLES,
+            history_limit=settings.EWT_HISTORY_LIMIT,
+        )
+        service_line_ewts.append(line_ewt)
+
+    provider_ewt = provider_ewt_minutes(
+        service_line_ewts=service_line_ewts,
+        aggregation=settings.EWT_PROVIDER_AGGREGATION,
+    )
+    return active_total, serving_total, round_minutes(provider_ewt)

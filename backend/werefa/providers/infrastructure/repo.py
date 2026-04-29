@@ -3,6 +3,7 @@ from math import asin, cos, radians, sin, sqrt
 
 from sqlmodel import Session, col, select
 
+from werefa.queue.application.ewt import CompletedSample
 from werefa.shared.enums import MembershipRole, TicketStatus
 from werefa.shared.models import (
     Provider,
@@ -111,15 +112,20 @@ def list_discoverable_providers(
     return pairs[offset : offset + limit]
 
 
-def provider_queue_hints(
+def provider_active_ticket_counts(
     *, session: Session, provider_id: uuid.UUID
-) -> tuple[int, int, int | None]:
+) -> tuple[int, int, list[ServiceItem], dict[uuid.UUID, int]]:
+    """Return ``(active_total, serving_total, services, waiting_per_service)``.
+
+    Used by both discovery (load factor) and EWT computation. Splitting
+    counting from the EWT math keeps the latter pure.
+    """
     services = session.exec(
         select(ServiceItem).where(ServiceItem.provider_id == provider_id)
     ).all()
     service_ids = [s.id for s in services]
     if not service_ids:
-        return 0, 0, None
+        return 0, 0, list(services), {}
     active_rows = session.exec(
         select(QueueEntry)
         .where(col(QueueEntry.service_item_id).in_(service_ids))
@@ -129,11 +135,48 @@ def provider_queue_hints(
             )
         )
     ).all()
-    waiting = sum(1 for row in active_rows if row.status == TicketStatus.waiting.value)
-    serving = sum(1 for row in active_rows if row.status == TicketStatus.serving.value)
-    active_services = [s for s in services if s.is_active]
-    if not active_services:
-        return waiting + serving, serving, None
-    avg_minutes = sum(s.avg_duration_minutes for s in active_services) / len(active_services)
-    estimated_wait = int(round(waiting * avg_minutes))
-    return waiting + serving, serving, estimated_wait
+    waiting_per_service: dict[uuid.UUID, int] = {sid: 0 for sid in service_ids}
+    serving = 0
+    for row in active_rows:
+        if row.status == TicketStatus.waiting.value:
+            waiting_per_service[row.service_item_id] = (
+                waiting_per_service.get(row.service_item_id, 0) + 1
+            )
+        elif row.status == TicketStatus.serving.value:
+            serving += 1
+    waiting_total = sum(waiting_per_service.values())
+    return waiting_total + serving, serving, list(services), waiting_per_service
+
+
+def list_completed_samples_for_service(
+    *,
+    session: Session,
+    service_item_id: uuid.UUID,
+    limit: int,
+) -> list[CompletedSample]:
+    """Most-recent completed serve durations for a service line.
+
+    Tickets without a ``serving_started_at`` (e.g. completed before the
+    Phase 8 migration ran) are skipped so the WMA only sees real samples.
+    """
+    statement = (
+        select(QueueEntry)
+        .where(QueueEntry.service_item_id == service_item_id)
+        .where(QueueEntry.status == TicketStatus.completed.value)
+        .where(col(QueueEntry.serving_started_at).is_not(None))
+        .where(col(QueueEntry.completed_at).is_not(None))
+        .order_by(col(QueueEntry.completed_at).desc())
+        .limit(limit)
+    )
+    rows = session.exec(statement).all()
+    samples: list[CompletedSample] = []
+    for r in rows:
+        if r.serving_started_at is None or r.completed_at is None:
+            continue  # belt-and-suspenders for type narrowing
+        samples.append(
+            CompletedSample(
+                serving_started_at=r.serving_started_at,
+                completed_at=r.completed_at,
+            )
+        )
+    return samples

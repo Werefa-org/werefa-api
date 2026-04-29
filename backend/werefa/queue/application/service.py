@@ -199,6 +199,9 @@ def call_next_transition(
         return current, None
 
     nxt.status = TicketStatus.serving.value
+    # FR-06: stamp the moment we begin serving so the WMA can compute a real
+    # serve duration on completion.
+    nxt.serving_started_at = utcnow()
     session.add(nxt)
     session.commit()
     if current is not None:
