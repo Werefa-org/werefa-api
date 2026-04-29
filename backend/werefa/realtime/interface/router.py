@@ -15,6 +15,7 @@ from werefa.core.db import engine
 from werefa.realtime import lifespan
 from werefa.realtime.domain.events import (
     BROADCAST_EVENT_TYPE,
+    LINE_CHAT_EVENT_TYPE,
     NOTIFY_EVENT_TYPE,
     QueueEventV1,
 )
@@ -52,7 +53,7 @@ def _message_for_ticket(message: str, ticket_id: uuid.UUID) -> bool:
     if not isinstance(raw, dict):
         return False
     msg_type = raw.get("type")
-    if msg_type == BROADCAST_EVENT_TYPE:
+    if msg_type in (BROADCAST_EVENT_TYPE, LINE_CHAT_EVENT_TYPE):
         return True
     if msg_type == NOTIFY_EVENT_TYPE:
         try:
