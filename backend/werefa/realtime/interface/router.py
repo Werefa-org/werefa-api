@@ -3,20 +3,17 @@ import logging
 import uuid
 from collections.abc import Callable
 
-import jwt
 from fastapi import APIRouter, HTTPException, Query, WebSocket, status
-from jwt.exceptions import InvalidTokenError
 from pydantic import ValidationError
 from sqlmodel import Session
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 from werefa.api.deps import ensure_provider_staff
-from werefa.core import security
-from werefa.core.config import settings
+from werefa.core.auth_ws import user_id_from_token
 from werefa.core.db import engine
 from werefa.realtime import lifespan
 from werefa.realtime.domain.events import QueueEventV1
-from werefa.shared.models import QueueEntry, ServiceItem, TokenPayload, User
+from werefa.shared.models import QueueEntry, ServiceItem, User
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +22,6 @@ router = APIRouter(prefix="/ws", tags=["realtime"])
 
 async def _close_socket(websocket: WebSocket, code: int, reason: str) -> None:
     await websocket.close(code=code, reason=reason)
-
-
-def _user_id_from_token(token: str) -> uuid.UUID | None:
-    try:
-        raw = jwt.decode(token, settings.SECRET_KEY, algorithms=[security.ALGORITHM])
-        data = TokenPayload(**raw)
-    except (InvalidTokenError, ValidationError, ValueError):
-        return None
-    if not data.sub:
-        return None
-    try:
-        return uuid.UUID(data.sub)
-    except ValueError:
-        return None
 
 
 def _message_for_ticket(message: str, ticket_id: uuid.UUID) -> bool:
@@ -115,7 +98,7 @@ async def queue_service_item_stream(
     token: str = Query(..., description="Bearer JWT (access token)"),
 ) -> None:
     await websocket.accept()
-    user_uuid = _user_id_from_token(token)
+    user_uuid = user_id_from_token(token)
     if user_uuid is None:
         await _close_socket(
             websocket,
@@ -161,7 +144,7 @@ async def queue_ticket_stream(
     token: str = Query(..., description="Bearer JWT (access token)"),
 ) -> None:
     await websocket.accept()
-    user_uuid = _user_id_from_token(token)
+    user_uuid = user_id_from_token(token)
     if user_uuid is None:
         await _close_socket(
             websocket,

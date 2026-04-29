@@ -11,7 +11,12 @@ from werefa.shared.models import (
     UserPublic,
 )
 
-router = APIRouter(tags=["private"], prefix="/private")
+router = APIRouter(
+    tags=["private"],
+    prefix="/private",
+    # Mounted from werefa.api.main only when settings.ENVIRONMENT == "local".
+    # Do not assume these endpoints exist in staging/production.
+)
 
 
 class PrivateUserCreate(BaseModel):
