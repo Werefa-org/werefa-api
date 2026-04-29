@@ -20,6 +20,7 @@ from werefa.core.security import get_password_hash  # noqa: E402
 from werefa.main import app  # noqa: E402
 from werefa.shared.enums import UserType  # noqa: E402
 from werefa.shared.models import (  # noqa: E402
+    BroadcastMessage,
     Provider,
     ProviderMembership,
     QueueEntry,
@@ -53,6 +54,7 @@ def db() -> Generator[Session, None, None]:
         init_db(session)
         _sync_superuser_password_with_settings(session)
         yield session
+        session.exec(delete(BroadcastMessage))
         session.exec(delete(Review))
         session.exec(delete(UserStrike))
         session.exec(delete(QueueEntry))
@@ -81,6 +83,7 @@ def _clear_provider_and_queue_between_tests(db: Session) -> Generator[None, None
     """
 
     def _clear() -> None:
+        db.exec(delete(BroadcastMessage))
         db.exec(delete(Review))
         db.exec(delete(UserStrike))
         db.exec(delete(QueueEntry))

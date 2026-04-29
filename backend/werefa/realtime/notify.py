@@ -1,13 +1,14 @@
 import asyncio
 import logging
 import uuid
+from collections.abc import Iterable
 
 from sqlalchemy import func
 from sqlmodel import Session, col, select
 
-from werefa.realtime.domain.events import QueueEventV1
+from werefa.realtime.domain.events import BroadcastEventV1, QueueEventV1
 from werefa.shared.enums import TicketStatus
-from werefa.shared.models import QueueEntry
+from werefa.shared.models import QueueEntry, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -64,3 +65,63 @@ def notify_queue_subscribers(
             logger.exception("Real-time fan-out task failed")
 
     t.add_done_callback(_log_done)
+
+
+def notify_broadcast_subscribers(
+    *,
+    broadcast_id: uuid.UUID,
+    provider_id: uuid.UUID,
+    body_text: str,
+    severity: str,
+    service_item_ids: Iterable[uuid.UUID],
+    original_service_item_id: uuid.UUID | None,
+) -> None:
+    """Best-effort fan-out of a broadcast to one or more service-line channels.
+
+    Failures are logged but never raise — the broadcast row is already
+    persisted and reachable through the REST list endpoint.
+    """
+    from werefa.realtime import lifespan
+
+    c = lifespan.coordinator
+    loop = lifespan.main_event_loop
+    if c is None or loop is None or not loop.is_running():
+        return
+
+    occurred_at = utcnow()
+    for sid in service_item_ids:
+        event = BroadcastEventV1(
+            broadcast_id=broadcast_id,
+            provider_id=provider_id,
+            # Wire-level: name the *channel* this delivery uses so clients
+            # always have a concrete service line to filter on. The
+            # persisted record keeps `original_service_item_id` truthful.
+            service_item_id=sid if original_service_item_id is not None else sid,
+            body=body_text,
+            severity=_severity_literal(severity),
+            occurred_at=occurred_at,
+        )
+        text = event.model_dump_json()
+        task = loop.create_task(c.publish(sid, text))
+
+        def _log_done(done: asyncio.Task[object]) -> None:
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Broadcast fan-out task failed")
+
+        task.add_done_callback(_log_done)
+
+
+def _severity_literal(value: str) -> str:
+    """Narrow ``str`` to the BroadcastEventV1 Literal at the boundary.
+
+    The pydantic Literal validation will reject anything else, but we
+    fall back to ``info`` to keep the realtime layer permissive when
+    fed unexpected input from upstream changes.
+    """
+    if value in ("info", "warning", "critical"):
+        return value
+    return "info"

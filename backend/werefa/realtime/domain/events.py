@@ -1,10 +1,13 @@
 import uuid
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_serializer
 
 from werefa.shared.models import utcnow
+
+BROADCAST_EVENT_TYPE = "broadcast_v1"
 
 
 class QueueEventType(StrEnum):
@@ -54,3 +57,29 @@ class QueueEventV1(BaseModel):
             occurred_at=utcnow(),
             reason=reason,
         )
+
+
+class BroadcastEventV1(BaseModel):
+    """Wire format for provider broadcasts (FR-08, UC-11).
+
+    Note the ``type`` is a fixed string (``broadcast_v1``) so clients can
+    discriminate between queue updates and broadcasts on the same socket
+    without parsing the full payload twice.
+    """
+
+    v: int = 1
+    type: Literal["broadcast_v1"] = "broadcast_v1"
+    broadcast_id: uuid.UUID
+    provider_id: uuid.UUID
+    # ``None`` means the message was published to every active service
+    # line of the provider; the realtime layer fans it out on each line's
+    # channel, so subscribers always see a concrete service line they're
+    # already attached to.
+    service_item_id: uuid.UUID | None = None
+    body: str = Field(min_length=1, max_length=500)
+    severity: Literal["info", "warning", "critical"] = "info"
+    occurred_at: datetime
+
+    @field_serializer("occurred_at")
+    def _ser_time(self, v: datetime) -> str:
+        return v.isoformat()

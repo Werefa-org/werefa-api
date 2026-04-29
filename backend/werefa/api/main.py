@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from werefa.api.routes import private, utils
+from werefa.broadcasts.interface import router as broadcasts_router_module
 from werefa.core.config import settings
 from werefa.identity.interface import login_router, users_router
 from werefa.providers.interface import router as providers_router
@@ -27,6 +28,7 @@ api_router.include_router(reviews_ticket_router)
 api_router.include_router(reviews_provider_router)
 api_router.include_router(strikes_me_router)
 api_router.include_router(strikes_admin_router)
+api_router.include_router(broadcasts_router_module)
 api_router.include_router(realtime_router)
 
 

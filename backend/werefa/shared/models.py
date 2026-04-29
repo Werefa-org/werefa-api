@@ -10,6 +10,7 @@ from sqlmodel import Field, Relationship, SQLModel
 from typing_extensions import Self
 
 from werefa.shared.enums import (
+    BroadcastSeverity,
     MembershipRole,
     TicketStatus,
     UserType,
@@ -430,6 +431,74 @@ class UserStrikesPublic(SQLModel):
     joins_blocked_until: datetime | None = None
     window_days: int
     limit: int
+
+
+# --- Provider broadcast (FR-08) ---
+
+
+class BroadcastMessageBase(SQLModel):
+    body: str = Field(min_length=1, max_length=500)
+    severity: str = Field(
+        default=BroadcastSeverity.info.value, max_length=16
+    )
+
+
+class BroadcastCreate(BroadcastMessageBase):
+    """Body of ``POST /providers/{provider_id}/broadcasts``.
+
+    ``service_item_id``: when omitted, the broadcast targets *every* active
+    service line of the provider; otherwise just the specified one.
+
+    ``idempotency_key``: optional client-supplied de-dupe key. The unique
+    index on the column means a retried request with the same key returns
+    the originally created record without re-publishing the realtime event.
+    """
+
+    service_item_id: uuid.UUID | None = None
+    idempotency_key: str | None = Field(default=None, max_length=80)
+
+
+class BroadcastMessage(BroadcastMessageBase, table=True):
+    __tablename__ = "broadcast_message"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider_id",
+            "idempotency_key",
+            name="uq_broadcast_provider_idem_key",
+        ),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    provider_id: uuid.UUID = Field(
+        foreign_key="provider.id", ondelete="CASCADE", index=True
+    )
+    service_item_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="service_item.id",
+        ondelete="CASCADE",
+        index=True,
+    )
+    author_user_id: uuid.UUID = Field(
+        foreign_key="user.id", ondelete="CASCADE", index=True
+    )
+    idempotency_key: str | None = Field(default=None, max_length=80)
+    created_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class BroadcastPublic(BroadcastMessageBase):
+    id: uuid.UUID
+    provider_id: uuid.UUID
+    service_item_id: uuid.UUID | None = None
+    author_user_id: uuid.UUID
+    created_at: datetime | None = None
+
+
+class BroadcastsPublic(SQLModel):
+    data: list[BroadcastPublic]
+    count: int
 
 
 # --- Shared ---
