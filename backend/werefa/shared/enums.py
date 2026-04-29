@@ -43,3 +43,29 @@ class BroadcastSeverity(str, Enum):
     info = "info"
     warning = "warning"
     critical = "critical"
+
+
+class NotificationKind(str, Enum):
+    """Reasons the system reaches out to a customer (FR-07)."""
+
+    head_to_counter = "head_to_counter"
+    you_are_next = "you_are_next"
+
+
+class NotificationChannel(str, Enum):
+    """Delivery transports for outbound notifications.
+
+    The order in a user's ``notification_prefs`` decides which channel
+    is tried first; ``logger`` is the always-deliverable backstop so
+    every dispatch produces at least one ledger row.
+    """
+
+    websocket = "websocket"
+    email = "email"
+    logger = "logger"
+
+
+class NotificationStatus(str, Enum):
+    delivered = "delivered"
+    failed = "failed"
+    skipped = "skipped"

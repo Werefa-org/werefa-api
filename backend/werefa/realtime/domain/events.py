@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_serializer
 from werefa.shared.models import utcnow
 
 BROADCAST_EVENT_TYPE = "broadcast_v1"
+NOTIFY_EVENT_TYPE = "notify_v1"
 
 
 class QueueEventType(StrEnum):
@@ -78,6 +79,29 @@ class BroadcastEventV1(BaseModel):
     service_item_id: uuid.UUID | None = None
     body: str = Field(min_length=1, max_length=500)
     severity: Literal["info", "warning", "critical"] = "info"
+    occurred_at: datetime
+
+    @field_serializer("occurred_at")
+    def _ser_time(self, v: datetime) -> str:
+        return v.isoformat()
+
+
+class NotifyEventV1(BaseModel):
+    """Wire format for smart pre-alerts (FR-07).
+
+    Targeted at a specific ticket — the ticket-stream filter forwards
+    only when the ``ticket_id`` matches the connected socket. This lets
+    the same service-line channel carry both broadcast (to everyone) and
+    notify (to one ticket) traffic without leaking state.
+    """
+
+    v: int = 1
+    type: Literal["notify_v1"] = "notify_v1"
+    ticket_id: uuid.UUID
+    service_item_id: uuid.UUID
+    kind: Literal["head_to_counter", "you_are_next"]
+    position: int = Field(ge=1)
+    body: str = Field(min_length=1, max_length=500)
     occurred_at: datetime
 
     @field_serializer("occurred_at")

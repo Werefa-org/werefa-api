@@ -122,6 +122,14 @@ class Settings(BaseSettings):
     # worst case (independent lines), "sum" assumes a single shared server.
     EWT_PROVIDER_AGGREGATION: Literal["max", "sum"] = "max"
 
+    # Smart pre-alerts (FR-07). ``LIVENESS_TOP_K`` doubles as the position
+    # threshold for the "head to counter" alert and (in Phase 11) the
+    # liveness-ping window. ``NOTIFICATION_DEFAULT_PREFS`` is the ordered
+    # list of channels new users start with — the first deliverable
+    # channel wins per dispatch.
+    LIVENESS_TOP_K: int = 3
+    NOTIFICATION_DEFAULT_PREFS: list[str] = ["websocket", "email", "logger"]
+
     def _check_default_secret(self, var_name: str, value: str | None) -> None:
         if value == "changethis":
             message = (
