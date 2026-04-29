@@ -101,6 +101,14 @@ class Settings(BaseSettings):
     FIRST_SUPERUSER: EmailStr
     FIRST_SUPERUSER_PASSWORD: str
 
+    # Penalty / no-show strikes (FR-12). The default values mirror the example
+    # in `doc.md` Chapter 3 ("3 strikes in 30 days → 7-day block"). They are
+    # tuned for the prod profile; tests override them via direct assignment to
+    # exercise window math without waiting real time.
+    STRIKE_WINDOW_DAYS: int = 30
+    STRIKE_LIMIT: int = 3
+    STRIKE_BLOCK_DAYS: int = 7
+
     def _check_default_secret(self, var_name: str, value: str | None) -> None:
         if value == "changethis":
             message = (
