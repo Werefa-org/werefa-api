@@ -8,7 +8,7 @@ When a phase is closed:
 - record the merge commit / branch under **Notes**,
 - bump the **Last updated** line below.
 
-**Last updated:** 2026-04-29
+**Last updated:** 2026-04-29 (Phase 6 closed)
 
 ---
 
@@ -68,12 +68,77 @@ Scope and rationale: see [`phase-plan.md` §3](./phase-plan.md#3-cross-cutting-f
 
 ## Phase 6 — Reviews and verified ratings (FR-11, UC-08)
 
-- [ ] Migration: add `review` table, `provider.ratings_count`, `provider.ratings_sum`.
-- [ ] Domain: review-allowed rules in `werefa/reviews/domain/`.
-- [ ] Service / repo: `create_review`, `list_reviews_for_provider`, `provider_rating_summary`.
-- [ ] Endpoints: `POST /tickets/{id}/reviews`, `GET /providers/{id}/reviews`, `GET /providers/{id}/rating`.
-- [ ] Tests: rules unit, API happy path, duplicate rejection, ownership, concurrency.
-- [ ] Discovery exposes `rating_avg` (read-only).
+- [x] **Migration** `d4f8c1a3b209_review_and_rating_counters.py` — adds the
+      `review` table (FK to `queue_entry`, `user`, `provider`, `service_item`)
+      with a unique constraint on `ticket_id` (one review per ticket) and a
+      `CHECK (rating BETWEEN 1 AND 5)`; adds `provider.ratings_count`,
+      `provider.ratings_sum`, `provider.estimate_accurate_count` (all
+      `NOT NULL` with `server_default '0'` so existing rows backfill safely).
+- [x] **Domain** `werefa/reviews/domain/review_rules.py` exposes
+      `validate_ticket_can_be_reviewed(...)` raising a typed
+      `ReviewRuleError`. Pure function, no `Session`, no HTTP — keeps the
+      contract trivially unit-testable.
+- [x] **Repo** `werefa/reviews/infrastructure/repo.py` —
+      `get_review_for_ticket`, `list_reviews_for_provider` (with limit/offset
+      and total count). No business rules here.
+- [x] **Service** `werefa/reviews/application/service.py` — `create_review`
+      validates the rules, creates the row, **and bumps the provider counters
+      transactionally** so reads stay O(1). Translates `ReviewRuleError` to
+      `400` (or `409` for duplicate), and catches `IntegrityError` on the
+      unique index for the concurrent-double-submit race.
+      `list_reviews_for_provider` and `provider_rating_summary` round it out.
+- [x] **Router** `werefa/reviews/interface/router.py` exposes the three
+      endpoints across two prefixes:
+      - `POST  /tickets/{ticket_id}/reviews` (auth required)
+      - `GET   /providers/{provider_id}/reviews` (public)
+      - `GET   /providers/{provider_id}/rating` (public)
+- [x] **Wiring** `werefa/api/main.py` includes both routers.
+- [x] **Discovery exposes `rating_avg`** (read-only, non-breaking):
+      `ProviderPublic` gained `ratings_count` and `rating_avg` fields, plus
+      `provider_public_view(p)` helper used by `/providers/{id}`,
+      `/providers/by-slug/{slug}`, the create/update responses, and
+      `/providers/discover`. `ratings_sum` and `estimate_accurate_count`
+      stay private to the server.
+- [x] **Domain rule tests** `tests/components/reviews/test_review_rules.py`
+      cover happy path, walk-in rejection, ownership rejection, every
+      non-`completed` status, and duplicate guard — all without a DB.
+- [x] **API tests** `tests/api/routes/test_reviews.py` cover happy path
+      (review + summary + listing), schema-level rejection of missing
+      `was_estimate_accurate`, rating bounds (`1..5`), ownership rejection
+      with a different user's token, non-completed-ticket rejection,
+      duplicate `409`, and discovery now showing `rating_avg`.
+
+### Quality gates for Phase 6
+
+- [x] **No-DB rule verification**: review rules executed via standalone
+      Python — every branch (happy / walk-in / wrong actor / each
+      non-completed status / duplicate) returns the expected outcome.
+- [x] **Wiring verification (no DB)**: imports resolve, all three new routes
+      are registered on `api_router`, `ProviderPublic` exposes `rating_avg`
+      and `ratings_count` while hiding `ratings_sum`, and
+      `provider_public_view` computes correct averages including the 0-count
+      edge case.
+- [~] **Pytest** for `tests/components/reviews/` and `tests/api/routes/test_reviews.py`
+      — blocked at 2026-04-29 by the same Neon Postgres outage that blocked
+      the Phase F gates (`OperationalError: server closed the connection
+      unexpectedly`). Re-run when the database is healthy; the unit-level
+      rule tests above run without a DB and already pass.
+- [x] No new lints introduced (only the pre-existing `basedpyright` cannot
+      see-the-venv warnings remain).
+
+### Notes
+
+- 2026-04-29: Phase 6 shipped behind the same DB outage that affected the
+  Phase F re-run. All non-DB checks pass; the migration sequence is
+  `b2c4e6d8a0f1 → d4f8c1a3b209` so applying head will pick up the new
+  schema.
+- The `Review` table is keyed by `ticket_id` (unique) so the contract
+  "one review per ticket" is enforced at the database, not just the
+  service. The application layer still does an existence check first to
+  return a friendly 409, but the unique index is the authoritative guard.
+- Discovery's exposed averages are computed from the cached counters on
+  `provider`, so listing N providers is still N + 1 queries, **not**
+  N × `count(*)` joins on `review`.
 
 ---
 

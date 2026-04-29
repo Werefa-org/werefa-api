@@ -30,6 +30,17 @@ def get_provider(session: Session, provider_id: uuid.UUID) -> Provider | None:
     return session.get(Provider, provider_id)
 
 
+def provider_public_view(p: Provider) -> dict:
+    """Derived fields shared by every provider read path.
+
+    Routes use ``ProviderPublic.model_validate(p, update=provider_public_view(p))``
+    to expose the rating aggregate without leaking ``ratings_sum`` directly.
+    """
+    count = p.ratings_count or 0
+    rating_avg = round((p.ratings_sum or 0) / count, 2) if count > 0 else None
+    return {"ratings_count": count, "rating_avg": rating_avg}
+
+
 def update_provider(
     session: Session, provider_id: uuid.UUID, body: ProviderUpdate
 ) -> Provider:
@@ -141,6 +152,11 @@ def discover_providers(
             load_factor = "medium"
         else:
             load_factor = "high"
+        rating_avg: float | None
+        if (p.ratings_count or 0) > 0:
+            rating_avg = round((p.ratings_sum or 0) / p.ratings_count, 2)
+        else:
+            rating_avg = None
         data.append(
             ProviderDiscoveryPublic.model_validate(
                 p,
@@ -150,6 +166,8 @@ def discover_providers(
                     "serving_tickets": serving_tickets,
                     "estimated_wait_minutes": estimated_wait_minutes,
                     "load_factor": load_factor,
+                    "ratings_count": p.ratings_count or 0,
+                    "rating_avg": rating_avg,
                 },
             )
         )

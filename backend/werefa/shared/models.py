@@ -134,10 +134,18 @@ class Provider(ProviderBase, table=True):
         default_factory=utcnow,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    # Aggregated rating counters; kept on the provider row so discovery
+    # and detail reads stay O(1). Updated transactionally with each new review.
+    ratings_count: int = Field(default=0, ge=0)
+    ratings_sum: int = Field(default=0, ge=0)
+    estimate_accurate_count: int = Field(default=0, ge=0)
     memberships: list["ProviderMembership"] = Relationship(
         back_populates="provider", cascade_delete=True
     )
     service_items: list["ServiceItem"] = Relationship(
+        back_populates="provider", cascade_delete=True
+    )
+    reviews: list["Review"] = Relationship(
         back_populates="provider", cascade_delete=True
     )
 
@@ -145,6 +153,8 @@ class Provider(ProviderBase, table=True):
 class ProviderPublic(ProviderBase):
     id: uuid.UUID
     created_at: datetime | None = None
+    ratings_count: int = 0
+    rating_avg: float | None = None
 
 
 class ProviderDiscoveryPublic(ProviderPublic):
@@ -297,6 +307,64 @@ class QueueEntryPublic(QueueEntryBase):
 class QueueEntriesPublic(SQLModel):
     data: list[QueueEntryPublic]
     count: int
+
+
+# --- Review ---
+
+
+class ReviewBase(SQLModel):
+    rating: int = Field(ge=1, le=5)
+    was_estimate_accurate: bool
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+class ReviewCreate(ReviewBase):
+    pass
+
+
+class Review(ReviewBase, table=True):
+    __tablename__ = "review"
+    __table_args__ = (
+        UniqueConstraint("ticket_id", name="uq_review_ticket"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    ticket_id: uuid.UUID = Field(
+        foreign_key="queue_entry.id", ondelete="CASCADE", index=True
+    )
+    user_id: uuid.UUID = Field(foreign_key="user.id", ondelete="CASCADE", index=True)
+    provider_id: uuid.UUID = Field(
+        foreign_key="provider.id", ondelete="CASCADE", index=True
+    )
+    service_item_id: uuid.UUID = Field(
+        foreign_key="service_item.id", ondelete="CASCADE", index=True
+    )
+    created_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+    provider: Provider | None = Relationship(back_populates="reviews")
+
+
+class ReviewPublic(ReviewBase):
+    id: uuid.UUID
+    ticket_id: uuid.UUID
+    provider_id: uuid.UUID
+    service_item_id: uuid.UUID
+    created_at: datetime | None = None
+
+
+class ReviewsPublic(SQLModel):
+    data: list[ReviewPublic]
+    count: int
+
+
+class ProviderRatingSummary(SQLModel):
+    provider_id: uuid.UUID
+    ratings_count: int = 0
+    rating_avg: float | None = None
+    estimate_accuracy_rate: float | None = None
 
 
 # --- Shared ---
