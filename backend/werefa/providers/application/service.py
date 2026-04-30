@@ -11,7 +11,7 @@ from werefa.queue.application.ewt import (
     round_minutes,
     service_line_ewt_minutes,
 )
-from werefa.shared.enums import MembershipRole
+from werefa.shared.enums import MembershipRole, VerificationStatus
 from werefa.shared.models import (
     MembershipCreate,
     Provider,
@@ -26,8 +26,56 @@ from werefa.shared.models import (
 )
 
 
-def create_provider(session: Session, body: ProviderCreate) -> Provider:
-    return provider_repo.create_provider(session=session, body=body)
+def create_provider(
+    session: Session,
+    body: ProviderCreate,
+    *,
+    auto_verify: bool = False,
+) -> Provider:
+    """Persist a provider with the supplied owner.
+
+    ``auto_verify=True`` is set by the router when the caller is a
+    superuser/admin; the resulting record skips the pending state. For
+    self-signups (``user_type='provider'``) the column stays at
+    ``pending`` until a separate admin verify call runs.
+    """
+    if body.owner_user_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "owner_user_id is required: every provider must have at "
+                "least one owner so the business is manageable."
+            ),
+        )
+    if session.get(User, body.owner_user_id) is None:
+        raise HTTPException(
+            status_code=400, detail="owner_user_id does not match any user"
+        )
+    return provider_repo.create_provider(
+        session=session, body=body, auto_verify=auto_verify
+    )
+
+
+def admin_verify_provider(session: Session, provider_id: uuid.UUID) -> Provider:
+    p = session.get(Provider, provider_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    p.verification_status = VerificationStatus.verified.value
+    session.add(p)
+    session.commit()
+    session.refresh(p)
+    return p
+
+
+def admin_reject_provider(session: Session, provider_id: uuid.UUID) -> Provider:
+    p = session.get(Provider, provider_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    p.verification_status = VerificationStatus.rejected.value
+    session.add(p)
+    session.commit()
+    session.refresh(p)
+    return p
 
 
 def get_provider_by_slug(session: Session, slug: str) -> Provider | None:
@@ -134,6 +182,7 @@ def discover_providers(
     include_private: bool,
     only_open: bool,
     include_paused: bool,
+    include_unverified: bool,
     limit: int,
     offset: int,
 ) -> ProviderDiscoveriesPublic:
@@ -146,6 +195,7 @@ def discover_providers(
         include_private=include_private,
         only_open=only_open,
         include_paused=include_paused,
+        include_unverified=include_unverified,
         limit=limit,
         offset=offset,
     )

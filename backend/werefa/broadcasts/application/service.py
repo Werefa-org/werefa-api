@@ -17,12 +17,14 @@ from sqlmodel import Session, col, select
 
 from werefa.broadcasts.infrastructure import repo as broadcasts_repo
 from werefa.realtime.notify import notify_broadcast_subscribers
-from werefa.shared.enums import BroadcastSeverity
+from werefa.shared.enums import BroadcastSeverity, TicketStatus
 from werefa.shared.models import (
     BroadcastCreate,
     BroadcastMessage,
     Provider,
+    QueueEntry,
     ServiceItem,
+    User,
 )
 
 logger = logging.getLogger(__name__)
@@ -160,6 +162,7 @@ def list_for_provider(
     provider_id: uuid.UUID,
     since: datetime | None,
     limit: int,
+    service_item_ids: list[uuid.UUID] | None = None,
 ) -> list[BroadcastMessage]:
     if session.get(Provider, provider_id) is None:
         raise HTTPException(
@@ -171,5 +174,28 @@ def list_for_provider(
         provider_id=provider_id,
         since=since,
         limit=limit,
+        service_item_ids=service_item_ids,
     )
     return list(rows)
+
+
+def active_service_item_ids_for_user(
+    session: Session, *, provider_id: uuid.UUID, user: User
+) -> list[uuid.UUID]:
+    """Return every service line at ``provider_id`` where ``user`` has
+    an active (waiting/serving) ticket. Used to scope the customer
+    read of broadcasts so the response doesn't leak operational
+    messages from queues the user isn't on.
+    """
+    rows = session.exec(
+        select(QueueEntry.service_item_id, ServiceItem.provider_id)
+        .join(ServiceItem, ServiceItem.id == QueueEntry.service_item_id)  # type: ignore[arg-type]
+        .where(QueueEntry.user_id == user.id)
+        .where(ServiceItem.provider_id == provider_id)
+        .where(
+            col(QueueEntry.status).in_(
+                (TicketStatus.waiting.value, TicketStatus.serving.value)
+            )
+        )
+    ).all()
+    return [cast(uuid.UUID, sid) for sid, _ in rows]

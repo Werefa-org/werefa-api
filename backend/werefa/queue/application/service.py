@@ -129,9 +129,13 @@ def join_queue_walk_in(
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
 
-    if not provider.is_open or provider.is_paused:
+    # UC-13 (HIGH-1): pause halts *remote* joins only. The kiosk staff
+    # still need to enrol walk-ins so the queue keeps reflecting reality
+    # ("doctor on emergency break" + a walk-in arrives anyway). Closed
+    # providers (``is_open == False``) genuinely refuse all joins.
+    if not provider.is_open:
         raise HTTPException(
-            status_code=400, detail="Provider is not accepting joins right now"
+            status_code=400, detail="Provider is closed"
         )
 
     num = svc.next_ticket_number
@@ -208,6 +212,53 @@ def call_next_transition(
         session.refresh(current)
     session.refresh(nxt)
     return current, nxt
+
+
+def cancel_my_ticket(
+    session: Session,
+    *,
+    ticket_id: uuid.UUID,
+    user: User,
+) -> QueueEntry:
+    """Customer-initiated cancel (CRIT-4).
+
+    Differs from staff ``set_ticket_status(cancelled)`` in two ways:
+
+    * Caller must be the ticket owner; staff cannot use this path.
+    * **No strike is recorded** — FR-12 reserves the penalty for true
+      no-shows (called but didn't appear). Voluntary leaves must stay
+      free of charge or users will park indefinitely to dodge strikes.
+    """
+    ticket = session.get(QueueEntry, ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if ticket.user_id is None or ticket.user_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only cancel tickets that belong to you",
+        )
+    if ticket_rules.is_terminal_status(ticket.status):
+        raise HTTPException(
+            status_code=409,
+            detail="This ticket is already in a terminal status",
+        )
+    if ticket.status == TicketStatus.serving.value:
+        # Once being served, only the provider should close the ticket
+        # so they can pick the right terminal status (completed vs
+        # no_show). Refuse the self-cancel.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "You're being served — please ask the provider to close "
+                "the ticket instead."
+            ),
+        )
+    ticket.status = TicketStatus.cancelled.value
+    ticket.completed_at = utcnow()
+    session.add(ticket)
+    session.commit()
+    session.refresh(ticket)
+    return ticket
 
 
 def set_ticket_status(

@@ -220,11 +220,13 @@ def test_customer_cannot_post_broadcast(
     assert r.status_code == 403, r.text
 
 
-def test_customer_cannot_list_broadcasts(
+def test_customer_without_active_ticket_cannot_list_broadcasts(
     client: TestClient,
     db: Session,
     superuser_token_headers: dict[str, str],
 ) -> None:
+    """A customer with no waiting/serving ticket on the provider gets
+    403 — broadcasts are operational state, not public news (CRIT-5)."""
     provider_id, _ = _create_provider_and_service(
         client=client, db=db, superuser_token_headers=superuser_token_headers
     )
@@ -234,6 +236,61 @@ def test_customer_cannot_list_broadcasts(
         headers=headers,
     )
     assert r.status_code == 403, r.text
+
+
+def test_customer_with_active_ticket_can_list_relevant_broadcasts(
+    client: TestClient,
+    db: Session,
+    superuser_token_headers: dict[str, str],
+) -> None:
+    """Once a customer holds an active ticket, they read broadcasts
+    that fan out to their service line (provider-wide + that line)."""
+    provider_id, service_id = _create_provider_and_service(
+        client=client, db=db, superuser_token_headers=superuser_token_headers
+    )
+    # Provider posts a wide broadcast and a service-scoped one.
+    r = client.post(
+        f"{settings.API_V1_STR}/providers/{provider_id}/broadcasts",
+        headers=superuser_token_headers,
+        json={"body": "doctor 20m late", "severity": "warning"},
+    )
+    assert r.status_code == 201, r.text
+    r = client.post(
+        f"{settings.API_V1_STR}/providers/{provider_id}/broadcasts",
+        headers=superuser_token_headers,
+        json={
+            "body": "line specific note",
+            "severity": "info",
+            "service_item_id": service_id,
+        },
+    )
+    assert r.status_code == 201, r.text
+
+    headers = _customer_headers(client, db)
+    # No ticket yet → still 403.
+    r = client.get(
+        f"{settings.API_V1_STR}/providers/{provider_id}/broadcasts",
+        headers=headers,
+    )
+    assert r.status_code == 403, r.text
+
+    # Customer joins the queue; now they have an active ticket on the
+    # provider so the broadcast list opens up.
+    r = client.post(
+        f"{settings.API_V1_STR}/service-items/{service_id}/join",
+        headers=headers,
+        json={},
+    )
+    assert r.status_code == 200, r.text
+
+    r = client.get(
+        f"{settings.API_V1_STR}/providers/{provider_id}/broadcasts",
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    bodies = {row["body"] for row in r.json()["data"]}
+    assert "doctor 20m late" in bodies
+    assert "line specific note" in bodies
 
 
 def test_list_broadcasts_returns_recent_first_with_since_filter(

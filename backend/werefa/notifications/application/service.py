@@ -235,11 +235,19 @@ def evaluate_smart_alerts_for_service_line(
 def list_user_notifications(
     session: Session, *, user: User, limit: int, offset: int
 ) -> tuple[list[Notification], int]:
-    base = select(Notification).where(Notification.user_id == user.id)
-    total_rows = session.exec(base).all()
-    total = len(total_rows)
+    # MED-3: COUNT(*) instead of materialising every row — the new
+    # ``(user_id, created_at)`` index makes both reads a single index
+    # scan.
+    total_raw = session.exec(
+        select(func.count())
+        .select_from(Notification)
+        .where(Notification.user_id == user.id)
+    ).one()
+    total = int(total_raw[0] if isinstance(total_raw, tuple) else total_raw)
     page = (
-        base.order_by(col(Notification.created_at).desc())
+        select(Notification)
+        .where(Notification.user_id == user.id)
+        .order_by(col(Notification.created_at).desc())
         .offset(offset)
         .limit(limit)
     )
