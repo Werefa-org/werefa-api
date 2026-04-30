@@ -7,6 +7,7 @@ substitutions:
   _PLATFORM: managed
   _PORT: "8080"
 
+
 steps:
   # Ensure Artifact Registry repo exists (safe to run on every build).
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
