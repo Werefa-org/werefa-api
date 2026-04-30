@@ -5,7 +5,7 @@ substitutions:
   _AR_REPO: werefa-repo
   _SERVICE_NAME: werefa-backend
   _PLATFORM: managed
-  _PORT: "8000"
+  _PORT: "8080"
 
 steps:
   # Ensure Artifact Registry repo exists (safe to run on every build).
