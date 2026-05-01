@@ -17,7 +17,9 @@ from sqlmodel import Field, Relationship, SQLModel
 from typing_extensions import Self
 
 from werefa.shared.enums import (
+    ApprovalQueueOrder,
     BroadcastSeverity,
+    JoinDocumentKind,
     LivenessState,
     MembershipRole,
     TicketStatus,
@@ -112,6 +114,10 @@ class User(UserBase, table=True):
     queue_entries: list["QueueEntry"] = Relationship(
         back_populates="user",
         cascade_delete=False,
+        sa_relationship_kwargs={
+            "primaryjoin": "QueueEntry.user_id == User.id",
+            "foreign_keys": "QueueEntry.user_id",
+        },
     )
     strikes: list["UserStrike"] = Relationship(
         back_populates="user", cascade_delete=True
@@ -323,6 +329,26 @@ class ServiceItemBase(SQLModel):
     allow_vip: bool = False
     vip_code: str | None = Field(default=None, max_length=20)
     line_chat_enabled: bool = True
+    requires_join_approval: bool = False
+    approval_queue_order: str = Field(
+        default=ApprovalQueueOrder.preserve_register_time.value,
+        max_length=32,
+    )
+    requires_join_documents: bool = False
+    join_document_requirements: list[dict] | None = Field(
+        default=None,
+        sa_column=Column(JSON, nullable=True),
+    )
+
+
+class JoinDocumentRequirement(SQLModel):
+    """One document slot seekers must fill when joining (stored on service line)."""
+
+    label: str = Field(min_length=1, max_length=120)
+    kind: str = Field(
+        default=JoinDocumentKind.any.value,
+        max_length=16,
+    )
 
 
 class ServiceItemCreate(ServiceItemBase):
@@ -342,6 +368,10 @@ class ServiceItemUpdate(SQLModel):
     allow_vip: bool | None = None
     vip_code: str | None = Field(default=None, max_length=20)
     line_chat_enabled: bool | None = None
+    requires_join_approval: bool | None = None
+    approval_queue_order: str | None = Field(default=None, max_length=32)
+    requires_join_documents: bool | None = None
+    join_document_requirements: list[dict] | None = None
 
 
 class ServiceItem(ServiceItemBase, table=True):
@@ -350,6 +380,10 @@ class ServiceItem(ServiceItemBase, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     provider_id: uuid.UUID = Field(foreign_key="provider.id", ondelete="CASCADE")
     next_ticket_number: int = Field(default=1, ge=1)
+    line_chat_cleared_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
     provider: Provider | None = Relationship(back_populates="service_items")
     queue_entries: list["QueueEntry"] = Relationship(
@@ -370,6 +404,8 @@ class QueueEntryBase(SQLModel):
     status: str = Field(default=TicketStatus.waiting.value, max_length=32)
     source: str = Field(max_length=32)
     guest_name: str | None = Field(default=None, max_length=100)
+    guest_phone: str | None = Field(default=None, max_length=32)
+    guest_email: str | None = Field(default=None, max_length=255)
     priority: int = Field(default=0, ge=0, le=10)
 
 
@@ -381,7 +417,8 @@ class QueueEntry(QueueEntryBase, table=True):
             "user_id",
             unique=True,
             postgresql_where=text(
-                "user_id IS NOT NULL AND (status)::text IN ('waiting','serving')"
+                "user_id IS NOT NULL AND (status)::text IN "
+                "('waiting','serving','pending_approval')"
             ),
         ),
     )
@@ -425,12 +462,105 @@ class QueueEntry(QueueEntryBase, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    # Set when staff clears the line (e.g. end of day). Ticket rows stay for analytics.
+    close_reason: str | None = Field(default=None, max_length=32)
+    approved_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    approved_by_user_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="user.id",
+        ondelete="SET NULL",
+    )
 
     service_item: ServiceItem | None = Relationship(back_populates="queue_entries")
-    user: User | None = Relationship(back_populates="queue_entries")
+    user: User | None = Relationship(
+        back_populates="queue_entries",
+        sa_relationship_kwargs={
+            "primaryjoin": "QueueEntry.user_id == User.id",
+            "foreign_keys": "QueueEntry.user_id",
+        },
+    )
+    approved_by: User | None = Relationship(
+        sa_relationship_kwargs={
+            "primaryjoin": "QueueEntry.approved_by_user_id == User.id",
+            "foreign_keys": "QueueEntry.approved_by_user_id",
+        },
+    )
     position_pings: list["PositionPing"] = Relationship(
         back_populates="ticket",
         cascade_delete=True,
+    )
+    join_documents: list["TicketJoinDocument"] = Relationship(
+        back_populates="ticket",
+        cascade_delete=True,
+    )
+
+
+class TicketJoinDocument(SQLModel, table=True):
+    """File uploaded by a seeker when joining a queue line."""
+
+    __tablename__ = "ticket_join_document"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    ticket_id: uuid.UUID = Field(
+        foreign_key="queue_entry.id",
+        ondelete="CASCADE",
+        index=True,
+    )
+    slot_index: int = Field(ge=0, le=20)
+    label: str = Field(max_length=120)
+    kind: str = Field(max_length=16)
+    filename: str = Field(max_length=255)
+    content_type: str = Field(max_length=120)
+    storage_relpath: str = Field(max_length=500)
+    resource_type: str = Field(default="raw", max_length=16)
+    created_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+    ticket: QueueEntry | None = Relationship(back_populates="join_documents")
+
+
+class TicketJoinDocumentPublic(SQLModel):
+    id: uuid.UUID
+    ticket_id: uuid.UUID
+    slot_index: int
+    label: str
+    kind: str
+    filename: str
+    content_type: str
+    created_at: datetime | None = None
+    download_url: str
+
+
+class TicketJoinDocumentsPublic(SQLModel):
+    data: list[TicketJoinDocumentPublic]
+    count: int
+
+
+class ProviderCustomerBlock(SQLModel, table=True):
+    """Provider-scoped ban — blocked users cannot join this business remotely."""
+
+    __tablename__ = "provider_customer_block"
+    __table_args__ = (
+        UniqueConstraint("provider_id", "user_id", name="uq_provider_customer_block"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    provider_id: uuid.UUID = Field(foreign_key="provider.id", ondelete="CASCADE")
+    user_id: uuid.UUID = Field(foreign_key="user.id", ondelete="CASCADE")
+    blocked_by_user_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="user.id",
+        ondelete="SET NULL",
+    )
+    reason: str | None = Field(default=None, max_length=500)
+    created_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
     )
 
 
@@ -474,6 +604,8 @@ class QueueJoin(SQLModel):
 
 class WalkInCreate(SQLModel):
     guest_name: str | None = Field(default=None, max_length=100)
+    guest_phone: str | None = Field(default=None, max_length=32)
+    guest_email: str | None = Field(default=None, max_length=255)
     is_vip: bool = False
 
 
@@ -488,6 +620,8 @@ class TicketPriorityUpdate(SQLModel):
 class WalkInBatchItem(SQLModel):
     client_ref: str | None = Field(default=None, max_length=120)
     guest_name: str | None = Field(default=None, max_length=100)
+    guest_phone: str | None = Field(default=None, max_length=32)
+    guest_email: str | None = Field(default=None, max_length=255)
 
 
 class JoinInviteCreate(SQLModel):
@@ -515,6 +649,46 @@ class QueueEntryPublic(QueueEntryBase):
     completed_at: datetime | None = None
     liveness_state: str = Field(default=LivenessState.idle.value, max_length=16)
     liveness_deadline_at: datetime | None = None
+    close_reason: str | None = None
+    approved_at: datetime | None = None
+    user_full_name: str | None = None
+    user_email: str | None = None
+    user_phone: str | None = None
+    is_banned: bool = False
+
+
+class ProviderCustomerPublic(SQLModel):
+    user_id: uuid.UUID
+    full_name: str | None = None
+    email: str | None = None
+    phone_number: str | None = None
+    is_banned: bool = False
+    ticket_count: int = 0
+    last_joined_at: datetime | None = None
+    has_active_ticket: bool = False
+
+
+class ProviderCustomersPublic(SQLModel):
+    data: list[ProviderCustomerPublic]
+    count: int
+
+
+class ProviderBanCreate(SQLModel):
+    user_id: uuid.UUID
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class TicketApprovalBody(SQLModel):
+    queue_order: ApprovalQueueOrder | None = Field(
+        default=None,
+        description="Override service default for this approval only.",
+    )
+
+
+class ClearQueueResult(SQLModel):
+    cleared_count: int = 0
+    notified_count: int = 0
+    is_paused: bool = True
 
 
 class QueueAheadPreview(SQLModel):
@@ -541,6 +715,23 @@ class TicketQueueSnapshot(SQLModel):
     estimated_wait_minutes: int | None = None
     pace_note: str = Field(max_length=200)
     ahead_preview: list[QueueAheadPreview] = Field(default_factory=list)
+
+
+class ServiceLinePreview(SQLModel):
+    """Public queue stats before joining (no ticket required)."""
+
+    service_item_id: uuid.UUID
+    service_name: str
+    provider_id: uuid.UUID
+    biz_name: str
+    profile_image_url: str | None = None
+    avg_duration_minutes: int = Field(ge=1)
+    waiting_count: int = Field(ge=0)
+    serving_count: int = Field(ge=0)
+    vip_waiting_count: int = Field(ge=0)
+    estimated_wait_minutes: int | None = None
+    pace_note: str = Field(max_length=200)
+    is_accepting_remote_joins: bool = True
 
 
 class KioskSyncBatchIn(SQLModel):
@@ -957,6 +1148,115 @@ class DemandEventIngest(SQLModel):
     service_item_id: uuid.UUID | None = None
     client_ref: str | None = Field(default=None, max_length=120)
     payload: dict | None = None
+
+
+class ProviderAnalyticsSummary(SQLModel):
+    page_views: int = 0
+    joins: int = 0
+    completions: int = 0
+    cancellations: int = 0
+    no_shows: int = 0
+    abandonments: int = 0
+    queue_clears: int = 0
+    lost_demand_total: int = 0
+    browse_without_join: int = 0
+    customer_left_voluntarily: int = 0
+    lost_join_opportunities: int = 0
+    avg_wait_minutes: int | None = None
+    avg_serve_minutes: int | None = None
+    min_wait_minutes: int | None = None
+    max_wait_minutes: int | None = None
+    min_serve_minutes: int | None = None
+    max_serve_minutes: int | None = None
+    conversion_rate_pct: float | None = None
+    customers_helped: int = 0
+    leave_rate_pct: float | None = None
+
+
+class TimeBucket(SQLModel):
+    label: str
+    value: int = 0
+    secondary: int = 0
+    hour: int | None = None
+    is_estimated: bool = False
+
+
+class AnalyticsHighlight(SQLModel):
+    """One plain-language fact for the dashboard."""
+
+    id: str
+    title: str
+    value: str
+    detail: str
+    tone: str = "neutral"  # good | caution | neutral | bad
+
+
+class AnalyticsPeakSlot(SQLModel):
+    """Best or worst slot for a metric."""
+
+    kind: str  # join | leave | wait | day
+    direction: str  # best | worst
+    label: str
+    metric_label: str
+    metric_value: str
+    explanation: str
+
+
+class AnalyticsStreaks(SQLModel):
+    active_days: int = 0
+    quiet_days: int = 0
+    current_busy_streak_days: int = 0
+    longest_busy_streak_days: int = 0
+    times_queue_cleared: int = 0
+    busiest_day_name: str | None = None
+    quietest_day_name: str | None = None
+
+
+class AnalyticsComparison(SQLModel):
+    label: str
+    period_a_label: str
+    period_a_value: str
+    period_b_label: str
+    period_b_value: str
+    verdict: str
+
+
+class ProviderAnalyticsServiceLine(SQLModel):
+    service_item_id: uuid.UUID
+    service_name: str
+    joins: int = 0
+    completed: int = 0
+    cancelled: int = 0
+    no_show: int = 0
+
+
+class ProviderAnalyticsPublic(SQLModel):
+    provider_id: uuid.UUID
+    service_item_id: uuid.UUID | None = None
+    range_days: int = 30
+    since: datetime | None = None
+    until: datetime | None = None
+    data_quality: str = "empty"
+    uses_estimates: bool = False
+    narrative_summary: str = ""
+    summary: ProviderAnalyticsSummary
+    hourly_activity: list[TimeBucket] = Field(default_factory=list)
+    hourly_leaves: list[TimeBucket] = Field(default_factory=list)
+    daily_trend: list[TimeBucket] = Field(default_factory=list)
+    daily_leaves: list[TimeBucket] = Field(default_factory=list)
+    weekday_activity: list[TimeBucket] = Field(default_factory=list)
+    weekday_leaves: list[TimeBucket] = Field(default_factory=list)
+    ticket_outcomes: dict[str, int] = Field(default_factory=dict)
+    join_sources: dict[str, int] = Field(default_factory=dict)
+    service_lines: list[ProviderAnalyticsServiceLine] = Field(default_factory=list)
+    insights: list[str] = Field(default_factory=list)
+    highlights: list[AnalyticsHighlight] = Field(default_factory=list)
+    peak_slots: list[AnalyticsPeakSlot] = Field(default_factory=list)
+    streaks: AnalyticsStreaks = Field(default_factory=AnalyticsStreaks)
+    comparisons: list[AnalyticsComparison] = Field(default_factory=list)
+    peak_hour: int | None = None
+    quiet_hour: int | None = None
+    peak_leave_hour: int | None = None
 
 
 # --- KYC ---
