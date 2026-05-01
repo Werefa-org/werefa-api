@@ -1,5 +1,8 @@
 timeout: "1200s"
 
+options:
+  logging: CLOUD_LOGGING_ONLY
+
 substitutions:
   _REGION: us-central1
   _AR_REPO: werefa-repo
