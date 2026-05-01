@@ -12,6 +12,10 @@ from werefa.api.deps import (
     ensure_provider_staff,
 )
 from werefa.broadcasts.application import service as broadcasts_service
+from werefa.broadcasts.application.serializers import (
+    broadcast_to_public,
+    broadcasts_to_public,
+)
 from werefa.providers.infrastructure import repo as provider_repo
 from werefa.shared.models import (
     BroadcastCreate,
@@ -49,7 +53,7 @@ def post_broadcast(
         # fresh publish from a deduped retry without needing to read the
         # response body.
         response.status_code = status.HTTP_200_OK
-    return record
+    return broadcast_to_public(session, record)
 
 
 @router.get(
@@ -94,7 +98,7 @@ def list_broadcasts(
             session, provider_id=provider_id, since=since, limit=limit
         )
         return BroadcastsPublic(
-            data=[BroadcastPublic.model_validate(r) for r in rows],
+            data=broadcasts_to_public(session, rows),
             count=len(rows),
         )
 
@@ -117,5 +121,5 @@ def list_broadcasts(
         service_item_ids=service_item_ids,
     )
     return BroadcastsPublic(
-        data=[BroadcastPublic.model_validate(r) for r in rows], count=len(rows)
+        data=broadcasts_to_public(session, rows), count=len(rows)
     )
