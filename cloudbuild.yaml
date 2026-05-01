@@ -59,6 +59,12 @@ steps:
       - ${_PLATFORM}
       - --port
       - ${_PORT}
+      - --memory
+      - 1Gi
+      - --cpu
+      - "1"
+      - --concurrency
+      - "80"
       - --quiet
 
 images:
