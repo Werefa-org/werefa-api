@@ -17,6 +17,8 @@ from werefa.shared.enums import UserType
 from werefa.shared.models import (
     MembershipCreate,
     MembershipPublic,
+    MyProviderPublic,
+    MyProvidersPublic,
     ProviderCreate,
     ProviderDiscoveriesPublic,
     ProviderPublic,
@@ -205,6 +207,42 @@ def remove_provider_member(
         session=session, current_user=current_user, provider_id=provider_id
     )
     return provider_service.remove_provider_member(session, provider_id, member_user_id)
+
+
+me_router = APIRouter(prefix="/users/me/providers", tags=["providers"])
+
+
+@me_router.get("/", response_model=MyProvidersPublic)
+def list_my_providers(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    role: str | None = Query(
+        default=None,
+        description=(
+            "Optional membership role filter. Use 'owner' to list only "
+            "businesses the user owns; omit to list every provider where "
+            "they have any membership."
+        ),
+    ),
+) -> Any:
+    """List every provider the logged-in user has a membership in.
+
+    Returns the same fields as ``GET /providers/{id}`` plus
+    ``membership_role`` (``owner`` / ``staff``) so the dashboard can
+    badge the row without an extra round trip. Sorted by newest first.
+    """
+    rows = provider_service.list_providers_for_user(
+        session, user_id=current_user.id, role=role
+    )
+    items = [
+        MyProviderPublic.model_validate(
+            p,
+            update={**provider_public_view(p), "membership_role": member_role},
+        )
+        for p, member_role in rows
+    ]
+    return MyProvidersPublic(data=items, count=len(items))
 
 
 admin_router = APIRouter(prefix="/admin/providers", tags=["admin"])

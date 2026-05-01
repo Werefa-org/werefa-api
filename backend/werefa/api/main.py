@@ -12,6 +12,7 @@ from werefa.notifications.interface.router import (
 )
 from werefa.providers.interface import router as providers_router
 from werefa.providers.interface.router import admin_router as providers_admin_router
+from werefa.providers.interface.router import me_router as providers_me_router
 from werefa.queue.interface import router as queue_router
 from werefa.realtime.interface import router as realtime_router
 from werefa.reviews.interface import (
@@ -33,6 +34,7 @@ api_router.include_router(login_router.router)
 api_router.include_router(users_router.router)
 api_router.include_router(utils.router)
 api_router.include_router(providers_router.router)
+api_router.include_router(providers_me_router)
 api_router.include_router(providers_admin_router)
 api_router.include_router(service_items_router.router)
 api_router.include_router(queue_router.router)

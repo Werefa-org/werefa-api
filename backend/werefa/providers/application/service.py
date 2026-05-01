@@ -97,6 +97,32 @@ def provider_public_view(p: Provider) -> dict:
     return {"ratings_count": count, "rating_avg": rating_avg}
 
 
+def list_providers_for_user(
+    session: Session,
+    *,
+    user_id: uuid.UUID,
+    role: str | None = None,
+) -> list[tuple[Provider, str]]:
+    """Service-layer wrapper for ``GET /users/me/providers``.
+
+    Validates the optional role filter so the API rejects garbage role
+    strings instead of silently returning an empty list.
+    """
+    if role is not None:
+        valid = {r.value for r in MembershipRole}
+        if role not in valid:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown role '{role}'. Expected one of: "
+                    f"{', '.join(sorted(valid))}."
+                ),
+            )
+    return provider_repo.list_providers_for_user(
+        session=session, user_id=user_id, role=role
+    )
+
+
 def update_provider(
     session: Session, provider_id: uuid.UUID, body: ProviderUpdate
 ) -> Provider:
