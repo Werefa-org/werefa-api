@@ -7,6 +7,7 @@ from sqlmodel import Session, col, select
 
 from werefa.core.config import settings
 from werefa.providers.infrastructure import repo as provider_repo
+from werefa.queue.application import customer_governance_service
 from werefa.queue.application import join_invite_service
 from werefa.queue.domain import ticket_rules
 from werefa.shared.enums import TicketSource, TicketStatus
@@ -67,8 +68,17 @@ def join_queue_remote(
     latitude: float | None = None,
     longitude: float | None = None,
     invite_token: str | None = None,
+    skip_document_check: bool = False,
 ) -> QueueEntry:
     svc = get_service_for_update(session, service_item_id)
+    if svc.requires_join_documents and not skip_document_check:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "This line requires document uploads. "
+                "Use the join form and attach each requested file."
+            ),
+        )
     if not svc.is_active:
         raise HTTPException(status_code=400, detail="Service is not active")
 
@@ -131,6 +141,9 @@ def join_queue_remote(
     # FR-12: penalty enforcement runs *before* we touch the row lock so a
     # blocked user pays no contention cost on the service row.
     strikes_service.assert_remote_join_allowed(session=session, user=user)
+    customer_governance_service.assert_not_banned(
+        session, provider_id=provider.id, user_id=user.id
+    )
 
     assert_single_active_ticket(session, user.id)
 
@@ -149,6 +162,13 @@ def join_queue_remote(
         and vip_code.strip().upper() == svc.vip_code.strip().upper()
     )
 
+    needs_approval = svc.requires_join_approval
+    initial_status = (
+        TicketStatus.pending_approval.value
+        if needs_approval
+        else TicketStatus.waiting.value
+    )
+
     num = svc.next_ticket_number
     svc.next_ticket_number = num + 1
     session.add(svc)
@@ -157,9 +177,9 @@ def join_queue_remote(
         service_item_id=service_item_id,
         user_id=user.id,
         ticket_number=num,
-        status=TicketStatus.waiting.value,
+        status=initial_status,
         source=source,
-        guest_name=None,
+        guest_name=user.full_name,
         priority=1 if is_vip else 0,
     )
     session.add(ticket)
@@ -196,6 +216,8 @@ def join_queue_walk_in(
     *,
     service_item_id: uuid.UUID,
     guest_name: str | None,
+    guest_phone: str | None = None,
+    guest_email: str | None = None,
     is_vip: bool = False,
 ) -> QueueEntry:
     svc = get_service_for_update(session, service_item_id)
@@ -226,6 +248,8 @@ def join_queue_walk_in(
         status=TicketStatus.waiting.value,
         source=TicketSource.kiosk_walk_in.value,
         guest_name=guest_name,
+        guest_phone=guest_phone,
+        guest_email=guest_email,
         priority=1 if is_vip else 0,
     )
     session.add(ticket)
@@ -331,7 +355,9 @@ def cancel_my_ticket(
             status_code=409,
             detail="This ticket is already in a terminal status",
         )
-    if ticket.status == TicketStatus.serving.value:
+    if ticket.status == TicketStatus.pending_approval.value:
+        pass
+    elif ticket.status == TicketStatus.serving.value:
         # Once being served, only the provider should close the ticket
         # so they can pick the right terminal status (completed vs
         # no_show). Refuse the self-cancel.

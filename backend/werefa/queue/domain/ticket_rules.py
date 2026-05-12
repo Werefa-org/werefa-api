@@ -4,7 +4,11 @@ from werefa.shared.enums import TicketStatus
 
 
 def active_status_values() -> tuple[str, ...]:
-    return (TicketStatus.waiting.value, TicketStatus.serving.value)
+    return (
+        TicketStatus.waiting.value,
+        TicketStatus.serving.value,
+        TicketStatus.pending_approval.value,
+    )
 
 
 def terminal_status_values() -> tuple[str, ...]:
