@@ -162,6 +162,20 @@ def update_provider(
     return p
 
 
+def set_provider_queue_paused(
+    session: Session, provider_id: uuid.UUID, *, paused: bool
+) -> Provider:
+    """UC-13: toggle ``is_paused`` — halts **remote** joins; walk-ins unchanged."""
+    p = session.get(Provider, provider_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    p.is_paused = paused
+    session.add(p)
+    session.commit()
+    session.refresh(p)
+    return p
+
+
 def add_provider_member(
     session: Session, provider_id: uuid.UUID, body: MembershipCreate
 ) -> ProviderMembership:

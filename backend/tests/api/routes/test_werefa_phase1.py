@@ -221,6 +221,78 @@ def test_provider_forbidden_for_non_staff(
     assert r.status_code == 403
 
 
+def test_pause_resume_queue_endpoints(
+    client: TestClient,
+    db: Session,
+    superuser_token_headers: dict[str, str],
+    normal_user_token_headers: dict[str, str],
+) -> None:
+    su = identity_repo.get_user_by_email(session=db, email=settings.FIRST_SUPERUSER)
+    assert su is not None
+    slug = f"pause-{uuid.uuid4().hex[:8]}"
+    r = client.post(
+        f"{settings.API_V1_STR}/providers/",
+        headers=superuser_token_headers,
+        json={"slug": slug, "biz_name": "Pause Demo", "owner_user_id": str(su.id)},
+    )
+    assert r.status_code == 200, r.text
+    provider_id = r.json()["id"]
+
+    r = client.post(
+        f"{settings.API_V1_STR}/providers/{provider_id}/services/",
+        headers=superuser_token_headers,
+        json={
+            "name": "Cut",
+            "avg_duration_minutes": 20,
+            "price": "15.00",
+        },
+    )
+    assert r.status_code == 200, r.text
+    sid = r.json()["id"]
+
+    r = client.post(
+        f"{settings.API_V1_STR}/providers/{provider_id}/pause-queue",
+        headers=normal_user_token_headers,
+    )
+    assert r.status_code == 403
+
+    r = client.post(
+        f"{settings.API_V1_STR}/providers/{provider_id}/pause-queue",
+        headers=superuser_token_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["is_paused"] is True
+
+    r = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/join",
+        headers=normal_user_token_headers,
+        json={},
+    )
+    assert r.status_code == 400
+    assert "not accepting" in r.json()["detail"].lower()
+
+    r = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/walk-in",
+        headers=superuser_token_headers,
+        json={"guest_name": "Kiosk"},
+    )
+    assert r.status_code == 200, r.text
+
+    r = client.post(
+        f"{settings.API_V1_STR}/providers/{provider_id}/resume-queue",
+        headers=superuser_token_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["is_paused"] is False
+
+    r = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/join",
+        headers=normal_user_token_headers,
+        json={},
+    )
+    assert r.status_code == 200, r.text
+
+
 def test_ticket_status_transition_rules(
     client: TestClient,
     db: Session,
