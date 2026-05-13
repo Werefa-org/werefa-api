@@ -1,7 +1,7 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, status
 
 from werefa.api.deps import CurrentUser, SessionDep, ensure_provider_staff
 from werefa.service_items.application import service as service_item_service
@@ -47,4 +47,23 @@ def update_service_item(
     )
     return service_item_service.update_service_item(
         session, provider_id, service_item_id, body
+    )
+
+
+@router.delete(
+    "/{service_item_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_service_item(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+    service_item_id: uuid.UUID,
+) -> None:
+    ensure_provider_staff(
+        session=session, current_user=current_user, provider_id=provider_id
+    )
+    service_item_service.delete_service_item(
+        session, provider_id, service_item_id
     )

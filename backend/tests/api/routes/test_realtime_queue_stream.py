@@ -87,6 +87,12 @@ def test_ticket_websocket_receives_ticket_status_update(
     )
     assert join.status_code == 200, join.text
     ticket_id = join.json()["id"]
+    cn = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/call-next",
+        headers=superuser_token_headers,
+    )
+    assert cn.status_code == 200, cn.text
+    assert cn.json()["id"] == ticket_id
     bearer = normal_user_token_headers["Authorization"]
     raw_token = bearer.replace("Bearer ", "", 1)
     q = quote(raw_token, safe="")

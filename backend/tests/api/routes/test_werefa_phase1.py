@@ -78,6 +78,22 @@ def test_provider_queue_flow(
         headers=superuser_token_headers,
         json={"status": "no_show"},
     )
+    assert r.status_code == 400
+    assert "serving" in r.json()["detail"].lower()
+
+    r = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/call-next",
+        headers=superuser_token_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == tid
+    assert r.json()["status"] == "serving"
+
+    r = client.patch(
+        f"{settings.API_V1_STR}/service-items/{sid}/tickets/{tid}/status",
+        headers=superuser_token_headers,
+        json={"status": "no_show"},
+    )
     assert r.status_code == 200
     assert r.json()["status"] == "no_show"
 

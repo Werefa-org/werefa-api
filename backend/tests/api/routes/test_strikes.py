@@ -89,7 +89,7 @@ def _join_then_no_show(
     headers: dict[str, str],
     superuser_token_headers: dict[str, str],
 ) -> str:
-    """Join the queue, then mark the resulting ticket as ``no_show``.
+    """Join the queue, call the customer to ``serving``, then ``no_show``.
 
     Returns the ticket id so the caller can assert on it.
     """
@@ -100,6 +100,14 @@ def _join_then_no_show(
     )
     assert r.status_code == 200, r.text
     ticket_id = r.json()["id"]
+
+    r = client.post(
+        f"{settings.API_V1_STR}/service-items/{service_id}/call-next",
+        headers=superuser_token_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == ticket_id
+    assert r.json()["status"] == TicketStatus.serving.value
 
     r = client.patch(
         f"{settings.API_V1_STR}/service-items/{service_id}/tickets/{ticket_id}/status",
@@ -153,6 +161,13 @@ def test_no_show_does_not_strike_walk_in(
     )
     assert r.status_code == 200, r.text
     ticket_id = r.json()["id"]
+
+    r = client.post(
+        f"{settings.API_V1_STR}/service-items/{service_id}/call-next",
+        headers=superuser_token_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == ticket_id
 
     r = client.patch(
         f"{settings.API_V1_STR}/service-items/{service_id}/tickets/{ticket_id}/status",

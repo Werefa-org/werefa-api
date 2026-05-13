@@ -5,9 +5,10 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
+from werefa.core.config import settings
 from werefa.queue.domain import ticket_rules
 from werefa.shared.enums import TicketSource, TicketStatus
-from werefa.shared.models import Provider, QueueEntry, ServiceItem, User, utcnow
+from werefa.shared.models import Provider, QueueEntry, Review, ServiceItem, User, utcnow
 from werefa.strikes.application import service as strikes_service
 
 
@@ -293,5 +294,80 @@ def set_ticket_status(
             )
 
     session.commit()
+    session.refresh(ticket)
+    return ticket
+
+
+def recall_last_completed(session: Session, service_item_id: uuid.UUID) -> QueueEntry:
+    """FR-09: put the most recently completed ticket back to ``serving``.
+
+    Guarded by a short wall-clock window, an empty serving slot, no review
+    on the ticket, and the one-active-ticket partial unique index per user.
+    """
+    get_service_for_update(session, service_item_id)
+
+    serving = session.exec(
+        select(QueueEntry)
+        .where(QueueEntry.service_item_id == service_item_id)
+        .where(QueueEntry.status == TicketStatus.serving.value)
+    ).first()
+    if serving is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Complete or no-show the current serving ticket before recalling "
+                "the previous customer"
+            ),
+        )
+
+    ticket = session.exec(
+        select(QueueEntry)
+        .where(QueueEntry.service_item_id == service_item_id)
+        .where(QueueEntry.status == TicketStatus.completed.value)
+        .where(col(QueueEntry.completed_at).is_not(None))
+        .order_by(col(QueueEntry.completed_at).desc())
+    ).first()
+
+    if ticket is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No completed ticket available to recall",
+        )
+
+    try:
+        ticket_rules.assert_recall_completed_allowed(
+            completed_at=ticket.completed_at,
+            now=utcnow(),
+            window_seconds=settings.RECALL_COMPLETED_WINDOW_SECONDS,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    reviewed = session.exec(
+        select(Review.id).where(Review.ticket_id == ticket.id)
+    ).first()
+    if reviewed is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot recall a ticket that already has a review",
+        )
+
+    ticket.status = TicketStatus.serving.value
+    ticket.completed_at = None
+    ticket.serving_started_at = utcnow()
+    session.add(ticket)
+    try:
+        session.commit()
+    except IntegrityError as err:
+        session.rollback()
+        if _is_one_active_user_unique_violation(err):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "That customer already holds another active ticket; "
+                    "recall is not possible"
+                ),
+            ) from None
+        raise
     session.refresh(ticket)
     return ticket

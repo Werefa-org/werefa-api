@@ -109,6 +109,10 @@ class Settings(BaseSettings):
     STRIKE_LIMIT: int = 3
     STRIKE_BLOCK_DAYS: int = 7
 
+    # FR-09 recall: staff can re-call the last **completed** ticket within this
+    # many seconds of ``completed_at`` (mistaken close / customer returns).
+    RECALL_COMPLETED_WINDOW_SECONDS: int = 90
+
     # Service-weighted moving-average EWT (FR-06, FR-01). The values below
     # match the algorithm described in `phase-plan.md` §8.2 — fresh samples
     # weigh more (30-min half life), at least 3 samples are required before

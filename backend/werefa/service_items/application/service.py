@@ -1,11 +1,14 @@
 import uuid
 
-from fastapi import HTTPException
-from sqlmodel import Session, col, select
+from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, col, func, select
 
+from werefa.queue.domain import ticket_rules
 from werefa.service_items.infrastructure import repo as service_item_repo
 from werefa.shared.models import (
     Provider,
+    QueueEntry,
     ServiceItem,
     ServiceItemCreate,
     ServiceItemUpdate,
@@ -48,3 +51,44 @@ def update_service_item(
     session.commit()
     session.refresh(row)
     return row
+
+
+def delete_service_item(
+    session: Session, provider_id: uuid.UUID, service_item_id: uuid.UUID
+) -> None:
+    """Hard-delete a service line when no tickets are ``waiting`` or ``serving``.
+
+    Historical tickets in terminal states are removed via FK cascade when the
+    service row is deleted (FR-10 guard: block only active queue members).
+    """
+    row = session.get(ServiceItem, service_item_id)
+    if row is None or row.provider_id != provider_id:
+        raise HTTPException(status_code=404, detail="Service not found")
+
+    active_count_raw = session.exec(
+        select(func.count())
+        .select_from(QueueEntry)
+        .where(QueueEntry.service_item_id == service_item_id)
+        .where(col(QueueEntry.status).in_(ticket_rules.active_status_values()))
+    ).one()
+    if isinstance(active_count_raw, tuple):
+        active_count_raw = active_count_raw[0]
+    active_count = int(active_count_raw or 0)
+    if active_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Cannot delete this service while tickets are waiting or being "
+                "served. Complete, cancel, or no-show them first."
+            ),
+        )
+
+    session.delete(row)
+    try:
+        session.commit()
+    except IntegrityError as err:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete this service: dependent records exist.",
+        ) from err
