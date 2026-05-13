@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
-from sqlmodel import Session
+from sqlmodel import Session, delete
 
 from werefa.core.config import settings
 from werefa.shared.models import (
@@ -209,6 +209,11 @@ def admin_unblock_user(*, session: Session, user_id: uuid.UUID) -> User:
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     user.joins_blocked_until = None
+    # ``evaluate_block`` also rejects remote joins when
+    # ``strikes_in_window >= STRIKE_LIMIT`` even after the explicit block
+    # timestamp is cleared. An admin override must restore eligibility, so
+    # the strike ledger for this user is reset (UC-16 governance unblock).
+    session.exec(delete(UserStrike).where(UserStrike.user_id == user_id))
     session.add(user)
     session.commit()
     session.refresh(user)

@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from werefa.core.config import settings
+from werefa.providers.infrastructure import repo as provider_repo
 from werefa.queue.domain import ticket_rules
 from werefa.shared.enums import TicketSource, TicketStatus
 from werefa.shared.models import Provider, QueueEntry, Review, ServiceItem, User, utcnow
@@ -61,6 +62,8 @@ def join_queue_remote(
     service_item_id: uuid.UUID,
     user: User,
     access_code: str | None,
+    latitude: float | None = None,
+    longitude: float | None = None,
 ) -> QueueEntry:
     svc = get_service_for_update(session, service_item_id)
     if not svc.is_active:
@@ -80,6 +83,34 @@ def join_queue_remote(
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Invalid or missing access code",
+            )
+
+    if provider.join_radius_m is not None:
+        if provider.latitude is None or provider.longitude is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This business uses a join distance limit but has no map "
+                    "coordinates configured"
+                ),
+            )
+        if latitude is None or longitude is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Share your latitude and longitude to join this queue remotely"
+                ),
+            )
+        distance_m = provider_repo.distance_meters(
+            base_lat=provider.latitude,
+            base_lon=provider.longitude,
+            target_lat=latitude,
+            target_lon=longitude,
+        )
+        if distance_m > provider.join_radius_m:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are too far from this business to join remotely",
             )
 
     # FR-12: penalty enforcement runs *before* we touch the row lock so a
