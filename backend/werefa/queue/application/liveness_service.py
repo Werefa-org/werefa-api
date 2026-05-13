@@ -68,7 +68,10 @@ def sync_liveness_for_service_line(
                 dirty = True
             continue
 
-        if ticket.source != TicketSource.remote_app.value:
+        if ticket.source not in (
+            TicketSource.remote_app.value,
+            TicketSource.qr_scan.value,
+        ):
             continue
 
         pos = _line_position(session, ticket)
@@ -140,7 +143,10 @@ def record_position_ping(
             status_code=400,
             detail="Position pings are only accepted for waiting tickets",
         )
-    if ticket.source != TicketSource.remote_app.value:
+    if ticket.source not in (
+        TicketSource.remote_app.value,
+        TicketSource.qr_scan.value,
+    ):
         raise HTTPException(
             status_code=400,
             detail="Walk-in tickets do not use remote liveness pings",

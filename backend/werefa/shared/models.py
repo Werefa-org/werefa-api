@@ -119,6 +119,17 @@ class User(UserBase, table=True):
     notifications: list["Notification"] = Relationship(
         back_populates="user", cascade_delete=True
     )
+    is_suspended: bool = Field(default=False)
+    suspended_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    suspended_reason: str | None = Field(default=None, max_length=500)
+    failed_login_count: int = Field(default=0, ge=0)
+    locked_until: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
 
 class UserPublic(UserBase):
@@ -191,6 +202,7 @@ class Provider(ProviderBase, table=True):
     reviews: list["Review"] = Relationship(
         back_populates="provider", cascade_delete=True
     )
+    last_rejection_reason: str | None = Field(default=None, max_length=1000)
 
 
 class ProviderPublic(ProviderBase):
@@ -205,6 +217,7 @@ class ProviderStaffPublic(ProviderPublic):
     share it. Returned by ``GET /providers/{id}/access-code``."""
 
     access_code: str | None = None
+    last_rejection_reason: str | None = None
 
 
 class MyProviderPublic(ProviderPublic):
@@ -215,6 +228,7 @@ class MyProviderPublic(ProviderPublic):
     """
 
     membership_role: str
+    last_rejection_reason: str | None = None
 
 
 class MyProvidersPublic(SQLModel):
@@ -399,6 +413,11 @@ class QueueJoin(SQLModel):
     access_code: str | None = Field(default=None, max_length=6)
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
+    invite_token: str | None = Field(
+        default=None,
+        max_length=64,
+        description="FR-02: optional QR/deep-link token for this service line.",
+    )
 
     @model_validator(mode="after")
     def _coords_paired(self) -> Self:
@@ -415,6 +434,27 @@ class TicketStatusUpdate(SQLModel):
     status: TicketStatus
 
 
+class WalkInBatchItem(SQLModel):
+    client_ref: str | None = Field(default=None, max_length=120)
+    guest_name: str | None = Field(default=None, max_length=100)
+
+
+class JoinInviteCreate(SQLModel):
+    ttl_hours: int = Field(default=24, ge=1, le=24 * 14)
+
+
+class JoinInviteCreated(SQLModel):
+    token: str
+    expires_at: datetime
+
+
+class JoinInviteResolved(SQLModel):
+    service_item_id: uuid.UUID
+    provider_id: uuid.UUID
+    slug: str
+    biz_name: str
+
+
 class QueueEntryPublic(QueueEntryBase):
     id: uuid.UUID
     service_item_id: uuid.UUID
@@ -423,6 +463,18 @@ class QueueEntryPublic(QueueEntryBase):
     completed_at: datetime | None = None
     liveness_state: str = Field(default=LivenessState.idle.value, max_length=16)
     liveness_deadline_at: datetime | None = None
+
+
+class KioskSyncBatchIn(SQLModel):
+    idempotency_key: str = Field(min_length=8, max_length=120)
+    walk_ins: list[WalkInBatchItem] = Field(min_length=1, max_length=200)
+
+
+class KioskSyncBatchOut(SQLModel):
+    """Replay-safe response for offline kiosk sync (NFR-02)."""
+
+    idempotent_replay: bool
+    tickets: list[QueueEntryPublic]
 
 
 class PositionPingCreate(SQLModel):
@@ -656,6 +708,10 @@ class Notification(NotificationBase, table=True):
         default_factory=utcnow,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    read_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
     user: User | None = Relationship(back_populates="notifications")
 
@@ -665,6 +721,7 @@ class NotificationPublic(NotificationBase):
     ticket_id: uuid.UUID | None = None
     position: int | None = None
     created_at: datetime | None = None
+    read_at: datetime | None = None
 
 
 class NotificationsPublic(SQLModel):
@@ -678,13 +735,190 @@ class NotificationPrefsUpdate(SQLModel):
     notification_prefs: list[str] = Field(
         description=(
             "Ordered list of channel keys (e.g. "
-            "[\"websocket\",\"email\"]); the first deliverable channel "
+            "[\"websocket\",\"email\",\"push\",\"sms\"]); the first deliverable channel "
             "wins per dispatch. Channels not recognised by the server "
             "are rejected with 400."
         ),
         min_length=1,
         max_length=8,
     )
+
+
+# --- Join invites (FR-02) ---
+
+
+class JoinInvite(SQLModel, table=True):
+    __tablename__ = "join_invite"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    token: str = Field(unique=True, index=True, max_length=64)
+    service_item_id: uuid.UUID = Field(
+        foreign_key="service_item.id",
+        ondelete="CASCADE",
+    )
+    created_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    expires_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    revoked_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+# --- Offline kiosk batches (NFR-02) ---
+
+
+class KioskSyncBatch(SQLModel, table=True):
+    __tablename__ = "kiosk_sync_batch"
+    __table_args__ = (
+        UniqueConstraint(
+            "service_item_id",
+            "idempotency_key",
+            name="uq_kiosk_sync_batch_service_idem",
+        ),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    service_item_id: uuid.UUID = Field(
+        foreign_key="service_item.id",
+        ondelete="CASCADE",
+    )
+    idempotency_key: str = Field(max_length=120)
+    created_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    result_json: dict = Field(sa_column=Column(JSON, nullable=False))
+
+
+# --- Demand / analytics (UC-07) ---
+
+
+class DemandEvent(SQLModel, table=True):
+    __tablename__ = "demand_event"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    event_type: str = Field(max_length=48, index=True)
+    provider_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="provider.id",
+        ondelete="SET NULL",
+    )
+    service_item_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="service_item.id",
+        ondelete="SET NULL",
+    )
+    user_id: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="user.id",
+        ondelete="SET NULL",
+    )
+    client_ref: str | None = Field(default=None, max_length=120)
+    payload: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    created_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class DemandEventIngest(SQLModel):
+    event_type: str = Field(max_length=48)
+    provider_id: uuid.UUID | None = None
+    service_item_id: uuid.UUID | None = None
+    client_ref: str | None = Field(default=None, max_length=120)
+    payload: dict | None = None
+
+
+# --- KYC ---
+
+
+class ProviderDocument(SQLModel, table=True):
+    __tablename__ = "provider_document"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    provider_id: uuid.UUID = Field(foreign_key="provider.id", ondelete="CASCADE", index=True)
+    uploaded_by_user_id: uuid.UUID = Field(
+        foreign_key="user.id",
+        ondelete="CASCADE",
+    )
+    filename: str = Field(max_length=255)
+    content_type: str = Field(max_length=120)
+    storage_relpath: str = Field(max_length=500)
+    created_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class ProviderDocumentPublic(SQLModel):
+    id: uuid.UUID
+    provider_id: uuid.UUID
+    filename: str
+    content_type: str
+    created_at: datetime | None = None
+
+
+# --- Admin ---
+
+
+class AdminAuditLog(SQLModel, table=True):
+    __tablename__ = "admin_audit_log"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    actor_user_id: uuid.UUID = Field(foreign_key="user.id", ondelete="CASCADE")
+    action: str = Field(max_length=64)
+    entity_type: str = Field(max_length=64)
+    entity_id: uuid.UUID | None = None
+    details: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    created_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class ProviderRejectBody(SQLModel):
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class AdminUserRow(SQLModel):
+    id: uuid.UUID
+    email: EmailStr
+    phone_number: str | None = None
+    is_active: bool
+    is_suspended: bool
+    user_type: str
+
+
+# --- OTP login stub (US-SYS-00) ---
+
+
+class EmailOtpChallenge(SQLModel, table=True):
+    __tablename__ = "email_otp_challenge"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    email: str = Field(index=True, max_length=255)
+    code_hash: str = Field(max_length=128)
+    expires_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    consumed_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    created_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class OtpRequest(SQLModel):
+    email: EmailStr
+
+
+class OtpVerify(SQLModel):
+    email: EmailStr
+    code: str = Field(min_length=4, max_length=10)
 
 
 # --- Shared ---

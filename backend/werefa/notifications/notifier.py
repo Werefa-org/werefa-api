@@ -162,6 +162,48 @@ class EmailNotifier:
         return True
 
 
+class PushNotifier:
+    """FCM/APNs-style push — integration placeholder (FR-07)."""
+
+    channel = NotificationChannel.push
+
+    def send(self, *, user: User, payload: NotificationPayload) -> bool:
+        from werefa.core.config import settings
+
+        if not settings.PUSH_DELIVERY_STUB_ENABLED:
+            logger.info(
+                "notification_push_skipped",
+                extra={"user_id": str(user.id)},
+            )
+            return False
+        logger.info(
+            "notification_push_stub_delivered",
+            extra={"user_id": str(user.id), "kind": payload.kind.value},
+        )
+        return True
+
+
+class SmsNotifier:
+    """SMS gateway — Twilio-class integration placeholder."""
+
+    channel = NotificationChannel.sms
+
+    def send(self, *, user: User, payload: NotificationPayload) -> bool:
+        from werefa.core.config import settings
+
+        if not settings.SMS_DELIVERY_STUB_ENABLED:
+            logger.info(
+                "notification_sms_skipped",
+                extra={"user_id": str(user.id)},
+            )
+            return False
+        logger.info(
+            "notification_sms_stub_delivered",
+            extra={"user_id": str(user.id), "kind": payload.kind.value},
+        )
+        return True
+
+
 def default_registry() -> dict[NotificationChannel, Notifier]:
     """Build the shipping registry.
 
@@ -171,5 +213,7 @@ def default_registry() -> dict[NotificationChannel, Notifier]:
     return {
         NotificationChannel.websocket: WebSocketNotifier(),
         NotificationChannel.email: EmailNotifier(),
+        NotificationChannel.push: PushNotifier(),
+        NotificationChannel.sms: SmsNotifier(),
         NotificationChannel.logger: LoggerNotifier(),
     }

@@ -1,7 +1,7 @@
 import uuid
 from datetime import timedelta
 
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 from sqlmodel import Session, col, func, select
 
 from werefa.core import security
@@ -20,6 +20,7 @@ from werefa.shared.models import (
     UsersPublic,
     UserUpdate,
     UserUpdateMe,
+    utcnow,
 )
 from werefa.utils import (
     generate_new_account_email,
@@ -31,11 +32,42 @@ from werefa.utils import (
 
 
 def login_access_token(session: Session, email: str, password: str) -> Token:
-    user = identity_repo.authenticate(session=session, email=email, password=password)
-    if not user:
+    user = identity_repo.get_user_by_email(session=session, email=email)
+    if user is None:
+        verify_password(password, identity_repo.DUMMY_HASH)
         raise HTTPException(status_code=400, detail="Incorrect email or password")
+    if user.is_suspended:
+        raise HTTPException(
+            status_code=403,
+            detail="Account suspended",
+        )
+    now = utcnow()
+    if user.locked_until is not None and user.locked_until > now:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts — try again later",
+        )
     if not user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
+    verified, updated_password_hash = verify_password(password, user.hashed_password)
+    if not verified:
+        user.failed_login_count = (user.failed_login_count or 0) + 1
+        if user.failed_login_count >= settings.MAX_FAILED_LOGIN_ATTEMPTS:
+            user.locked_until = now + timedelta(
+                minutes=settings.LOGIN_LOCKOUT_MINUTES
+            )
+        session.add(user)
+        session.commit()
+        raise HTTPException(status_code=400, detail="Incorrect email or password")
+
+    user.failed_login_count = 0
+    user.locked_until = None
+    if updated_password_hash:
+        user.hashed_password = updated_password_hash
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     return Token(
         access_token=security.create_access_token(

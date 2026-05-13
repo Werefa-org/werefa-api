@@ -20,9 +20,15 @@ from werefa.core.security import get_password_hash  # noqa: E402
 from werefa.main import app  # noqa: E402
 from werefa.shared.enums import UserType  # noqa: E402
 from werefa.shared.models import (  # noqa: E402
+    AdminAuditLog,
     BroadcastMessage,
+    DemandEvent,
+    EmailOtpChallenge,
+    JoinInvite,
+    KioskSyncBatch,
     Notification,
     Provider,
+    ProviderDocument,
     ProviderMembership,
     QueueEntry,
     Review,
@@ -55,6 +61,12 @@ def db() -> Generator[Session, None, None]:
         init_db(session)
         _sync_superuser_password_with_settings(session)
         yield session
+        session.exec(delete(EmailOtpChallenge))
+        session.exec(delete(AdminAuditLog))
+        session.exec(delete(ProviderDocument))
+        session.exec(delete(DemandEvent))
+        session.exec(delete(JoinInvite))
+        session.exec(delete(KioskSyncBatch))
         session.exec(delete(Notification))
         session.exec(delete(BroadcastMessage))
         session.exec(delete(Review))
@@ -85,6 +97,12 @@ def _clear_provider_and_queue_between_tests(db: Session) -> Generator[None, None
     """
 
     def _clear() -> None:
+        db.exec(delete(EmailOtpChallenge))
+        db.exec(delete(AdminAuditLog))
+        db.exec(delete(ProviderDocument))
+        db.exec(delete(DemandEvent))
+        db.exec(delete(JoinInvite))
+        db.exec(delete(KioskSyncBatch))
         db.exec(delete(Notification))
         db.exec(delete(BroadcastMessage))
         db.exec(delete(Review))
@@ -103,6 +121,11 @@ def _clear_provider_and_queue_between_tests(db: Session) -> Generator[None, None
             update(User).values(
                 joins_blocked_until=None,
                 notification_prefs=None,
+                failed_login_count=0,
+                locked_until=None,
+                is_suspended=False,
+                suspended_at=None,
+                suspended_reason=None,
             )
         )
         db.commit()

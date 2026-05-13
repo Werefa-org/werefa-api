@@ -27,6 +27,7 @@ from werefa.shared.models import (
     NotificationPrefsUpdate,
     QueueEntry,
     User,
+    utcnow,
 )
 
 logger = logging.getLogger(__name__)
@@ -248,6 +249,22 @@ def evaluate_smart_alerts_for_service_line(
     return fired
 
 
+def mark_notification_read(
+    session: Session, *, user: User, notification_id: uuid.UUID
+) -> Notification:
+    row = session.get(Notification, notification_id)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Notification not found",
+        )
+    row.read_at = utcnow()
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
 def list_user_notifications(
     session: Session, *, user: User, limit: int, offset: int
 ) -> tuple[list[Notification], int]:
@@ -302,6 +319,7 @@ __all__ = [
     "evaluate_smart_alerts_for_service_line",
     "get_registry",
     "list_user_notifications",
+    "mark_notification_read",
     "reset_prefs_default",
     "set_registry",
     "update_prefs",
