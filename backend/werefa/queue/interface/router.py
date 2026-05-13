@@ -1,15 +1,18 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 from sqlmodel import col, select
 
 from werefa.api.deps import CurrentUser, SessionDep, ensure_provider_staff
 from werefa.notifications.application import service as notifications_service
+from werefa.queue.application import liveness_service
 from werefa.queue.application import service as queue_service
 from werefa.realtime.notify import notify_queue_subscribers
 from werefa.shared.enums import TicketStatus
 from werefa.shared.models import (
+    LivenessPublic,
+    PositionPingCreate,
     QueueEntriesPublic,
     QueueEntry,
     QueueEntryPublic,
@@ -70,6 +73,86 @@ def join_queue(
         session, service_item_id=service_item_id
     )
     return QueueEntryPublic.model_validate(ticket)
+
+
+@router.post(
+    "/{service_item_id}/tickets/{ticket_id}/position",
+    response_model=QueueEntryPublic,
+)
+def submit_position_ping(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    ticket_id: uuid.UUID,
+    body: PositionPingCreate,
+) -> Any:
+    _service_or_404(session, service_item_id)
+    ticket = session.get(QueueEntry, ticket_id)
+    if ticket is None or ticket.service_item_id != service_item_id:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if ticket.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the ticket holder can submit position pings",
+        )
+    row = liveness_service.record_position_ping(
+        session,
+        ticket_id=ticket_id,
+        service_item_id=service_item_id,
+        user=current_user,
+        latitude=body.latitude,
+        longitude=body.longitude,
+        accuracy_m=body.accuracy_m,
+    )
+    notify_queue_subscribers(
+        session, service_item_id, ticket=row, reason="liveness_ping"
+    )
+    notifications_service.evaluate_smart_alerts_for_service_line(
+        session, service_item_id=service_item_id
+    )
+    return QueueEntryPublic.model_validate(row)
+
+
+@router.get(
+    "/{service_item_id}/tickets/{ticket_id}/liveness",
+    response_model=LivenessPublic,
+)
+def read_ticket_liveness(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    ticket_id: uuid.UUID,
+) -> Any:
+    svc = _service_or_404(session, service_item_id)
+    ticket = session.get(QueueEntry, ticket_id)
+    if ticket is None or ticket.service_item_id != service_item_id:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if ticket.user_id is None:
+        ensure_provider_staff(
+            session=session,
+            current_user=current_user,
+            provider_id=svc.provider_id,
+        )
+    elif not current_user.is_superuser and ticket.user_id != current_user.id:
+        ensure_provider_staff(
+            session=session,
+            current_user=current_user,
+            provider_id=svc.provider_id,
+        )
+    t, last = liveness_service.read_liveness(
+        session, ticket_id=ticket_id, service_item_id=service_item_id
+    )
+    return LivenessPublic(
+        ticket_id=t.id,
+        liveness_state=t.liveness_state,
+        liveness_deadline_at=t.liveness_deadline_at,
+        last_ping_at=last.sent_at if last else None,
+        last_latitude=last.latitude if last else None,
+        last_longitude=last.longitude if last else None,
+        last_accuracy_m=last.accuracy_m if last else None,
+    )
 
 
 @router.post("/{service_item_id}/walk-in", response_model=QueueEntryPublic)

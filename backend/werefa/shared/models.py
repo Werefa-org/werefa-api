@@ -18,6 +18,7 @@ from typing_extensions import Self
 
 from werefa.shared.enums import (
     BroadcastSeverity,
+    LivenessState,
     MembershipRole,
     TicketStatus,
     UserType,
@@ -356,8 +357,42 @@ class QueueEntry(QueueEntryBase, table=True):
     # match. ``None`` means no alerts have been sent for this ticket.
     last_alert_position: int | None = Field(default=None, ge=1)
 
+    # FR-05: top-of-queue presence; see ``position_ping`` + liveness sync.
+    liveness_state: str = Field(
+        default=LivenessState.idle.value,
+        max_length=16,
+    )
+    liveness_deadline_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
     service_item: ServiceItem | None = Relationship(back_populates="queue_entries")
     user: User | None = Relationship(back_populates="queue_entries")
+    position_pings: list["PositionPing"] = Relationship(
+        back_populates="ticket",
+        cascade_delete=True,
+    )
+
+
+class PositionPing(SQLModel, table=True):
+    __tablename__ = "position_ping"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    ticket_id: uuid.UUID = Field(
+        foreign_key="queue_entry.id",
+        ondelete="CASCADE",
+        index=True,
+    )
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    accuracy_m: int | None = Field(default=None, ge=0)
+    sent_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+    ticket: QueueEntry | None = Relationship(back_populates="position_pings")
 
 
 class QueueJoin(SQLModel):
@@ -386,6 +421,24 @@ class QueueEntryPublic(QueueEntryBase):
     user_id: uuid.UUID | None = None
     joined_at: datetime | None = None
     completed_at: datetime | None = None
+    liveness_state: str = Field(default=LivenessState.idle.value, max_length=16)
+    liveness_deadline_at: datetime | None = None
+
+
+class PositionPingCreate(SQLModel):
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    accuracy_m: int | None = Field(default=None, ge=0)
+
+
+class LivenessPublic(SQLModel):
+    ticket_id: uuid.UUID
+    liveness_state: str
+    liveness_deadline_at: datetime | None = None
+    last_ping_at: datetime | None = None
+    last_latitude: float | None = None
+    last_longitude: float | None = None
+    last_accuracy_m: int | None = None
 
 
 class QueueEntriesPublic(SQLModel):

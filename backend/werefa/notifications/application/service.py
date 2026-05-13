@@ -180,6 +180,13 @@ def evaluate_smart_alerts_for_service_line(
     is idempotent thanks to ``last_alert_position`` and safe to invoke
     even when nothing changed.
     """
+    from werefa.queue.application import liveness_service
+    from werefa.realtime.notify import notify_queue_subscribers
+
+    liveness_touched = liveness_service.sync_liveness_for_service_line(
+        session, service_item_id
+    )
+
     rows = session.exec(
         select(QueueEntry)
         .where(QueueEntry.service_item_id == service_item_id)
@@ -225,10 +232,19 @@ def evaluate_smart_alerts_for_service_line(
         ticket.last_alert_position = pos
         session.add(ticket)
 
-    if fired or any(t.last_alert_position for t in rows):
+    should_commit = (
+        bool(fired)
+        or liveness_touched
+        or any(t.last_alert_position is not None for t in rows)
+    )
+    if should_commit:
         # Commit so subsequent reads see the fresh ledger rows + alerts
         # state without leaking the open transaction across requests.
         session.commit()
+
+    if liveness_touched:
+        notify_queue_subscribers(session, service_item_id, reason="liveness")
+
     return fired
 
 

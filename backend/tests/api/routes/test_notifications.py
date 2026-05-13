@@ -13,6 +13,7 @@ the default in ``settings`` the assertions below need a refresh.
 
 import uuid
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
@@ -22,6 +23,14 @@ from werefa.core.config import settings
 from werefa.identity.infrastructure import repo as identity_repo
 from werefa.shared.enums import NotificationKind
 from werefa.shared.models import UserCreate
+
+
+@pytest.fixture(autouse=True)
+def _disable_liveness_for_notification_tests() -> None:
+    prev = settings.LIVENESS_ENABLED
+    settings.LIVENESS_ENABLED = False
+    yield
+    settings.LIVENESS_ENABLED = prev
 
 
 def _create_provider_and_service(
