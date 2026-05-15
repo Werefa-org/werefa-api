@@ -1,7 +1,7 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile, status
 from sqlmodel import col, select
 
 from werefa.api.deps import CurrentUser, SessionDep, ensure_provider_staff
@@ -10,12 +10,16 @@ from werefa.queue.application import join_invite_service
 from werefa.queue.application import line_chat_service
 from werefa.queue.application import liveness_service
 from werefa.queue.application import snapshot_service
+from werefa.queue.application import clear_queue_service
+from werefa.queue.application import customer_governance_service
 from werefa.queue.application import kiosk_batch_service
+from werefa.queue.application import join_documents_service
 from werefa.queue.application import service as queue_service
 from werefa.queue.application.serializers import queue_entry_to_public
 from werefa.realtime.notify import notify_queue_subscribers
 from werefa.shared.enums import TicketStatus
 from werefa.shared.models import (
+    ClearQueueResult,
     JoinInviteCreate,
     JoinInviteCreated,
     KioskSyncBatchIn,
@@ -34,6 +38,11 @@ from werefa.shared.models import (
     TicketQueueSnapshot,
     TicketStatusUpdate,
     WalkInCreate,
+    ProviderBanCreate,
+    ProviderCustomersPublic,
+    TicketApprovalBody,
+    TicketJoinDocumentsPublic,
+    ServiceLinePreview,
 )
 
 router = APIRouter(prefix="/service-items", tags=["queue"])
@@ -46,6 +55,21 @@ def _service_or_404(session: SessionDep, service_item_id: uuid.UUID) -> ServiceI
     return row
 
 
+@router.get(
+    "/{service_item_id}/line-preview",
+    response_model=ServiceLinePreview,
+)
+def read_service_line_preview(
+    *,
+    session: SessionDep,
+    service_item_id: uuid.UUID,
+) -> Any:
+    """Public queue stats before joining (no auth)."""
+    return snapshot_service.build_service_line_preview(
+        session, service_item_id=service_item_id
+    )
+
+
 @router.get("/me/tickets", response_model=QueueEntriesPublic)
 def my_active_tickets(*, session: SessionDep, current_user: CurrentUser) -> Any:
     statement = (
@@ -53,7 +77,11 @@ def my_active_tickets(*, session: SessionDep, current_user: CurrentUser) -> Any:
         .where(QueueEntry.user_id == current_user.id)
         .where(
             col(QueueEntry.status).in_(
-                (TicketStatus.waiting.value, TicketStatus.serving.value)
+                (
+                    TicketStatus.waiting.value,
+                    TicketStatus.serving.value,
+                    TicketStatus.pending_approval.value,
+                )
             )
         )
         .order_by(col(QueueEntry.joined_at))
@@ -85,10 +113,88 @@ def join_queue(
     notify_queue_subscribers(
         session, service_item_id, ticket=ticket, reason="join"
     )
-    notifications_service.evaluate_smart_alerts_for_service_line(
-        session, service_item_id=service_item_id
+    if ticket.status != TicketStatus.pending_approval.value:
+        notifications_service.evaluate_smart_alerts_for_service_line(
+            session, service_item_id=service_item_id
+        )
+    return queue_entry_to_public(session, ticket)
+
+
+@router.post(
+    "/{service_item_id}/join-with-files",
+    response_model=QueueEntryPublic,
+)
+async def join_queue_with_files(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    access_code: str | None = Form(default=None),
+    vip_code: str | None = Form(default=None),
+    invite_token: str | None = Form(default=None),
+    latitude: float | None = Form(default=None),
+    longitude: float | None = Form(default=None),
+    documents: list[UploadFile] = File(...),
+) -> Any:
+    svc = _service_or_404(session, service_item_id)
+    join_documents_service.assert_join_documents_ready(svc, documents)
+    ticket = queue_service.join_queue_remote(
+        session,
+        service_item_id=service_item_id,
+        user=current_user,
+        access_code=access_code,
+        latitude=latitude,
+        longitude=longitude,
+        invite_token=invite_token,
+        vip_code=vip_code,
+        skip_document_check=True,  # files validated and stored below
     )
-    return QueueEntryPublic.model_validate(ticket)
+    requirements = join_documents_service.parse_requirements(
+        svc.join_document_requirements
+    )
+    await join_documents_service.store_ticket_join_documents(
+        session,
+        ticket_id=ticket.id,
+        service_item_id=service_item_id,
+        requirements=requirements,
+        uploads=documents,
+    )
+    session.refresh(ticket)
+    notify_queue_subscribers(
+        session, service_item_id, ticket=ticket, reason="join"
+    )
+    if ticket.status != TicketStatus.pending_approval.value:
+        notifications_service.evaluate_smart_alerts_for_service_line(
+            session, service_item_id=service_item_id
+        )
+    return queue_entry_to_public(session, ticket)
+
+
+@router.get(
+    "/{service_item_id}/tickets/{ticket_id}/documents",
+    response_model=TicketJoinDocumentsPublic,
+)
+def list_ticket_join_documents(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    ticket_id: uuid.UUID,
+) -> Any:
+    svc = _service_or_404(session, service_item_id)
+    ticket = session.get(QueueEntry, ticket_id)
+    if ticket is None or ticket.service_item_id != service_item_id:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if ticket.user_id != current_user.id:
+        ensure_provider_staff(
+            session=session,
+            current_user=current_user,
+            provider_id=svc.provider_id,
+        )
+    rows = join_documents_service.list_ticket_join_documents(
+        session, ticket_id=ticket_id
+    )
+    return TicketJoinDocumentsPublic(data=rows, count=len(rows))
 
 
 @router.post(
@@ -303,6 +409,8 @@ def register_walk_in(
         session,
         service_item_id=service_item_id,
         guest_name=body.guest_name,
+        guest_phone=body.guest_phone,
+        guest_email=body.guest_email,
         is_vip=body.is_vip,
     )
     notify_queue_subscribers(
@@ -357,8 +465,27 @@ def list_tickets_for_service(
         provider_id=svc.provider_id,
     )
     rows = queue_service.list_queue_entries(session, service_item_id)
-    data = [QueueEntryPublic.model_validate(r) for r in rows]
+    data = [queue_entry_to_public(session, r) for r in rows]
     return QueueEntriesPublic(data=data, count=len(data))
+
+
+@router.post("/{service_item_id}/clear-queue", response_model=ClearQueueResult)
+def clear_queue(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+) -> Any:
+    """End-of-day reset: close active tickets, hide chat, pause joins (data retained)."""
+    svc = _service_or_404(session, service_item_id)
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=svc.provider_id,
+    )
+    return clear_queue_service.clear_service_line_queue(
+        session, service_item_id=service_item_id
+    )
 
 
 @router.post("/{service_item_id}/call-next", response_model=QueueEntryPublic | None)
@@ -483,4 +610,86 @@ def update_ticket_status(
     notifications_service.evaluate_smart_alerts_for_service_line(
         session, service_item_id=service_item_id
     )
-    return QueueEntryPublic.model_validate(row)
+    return queue_entry_to_public(session, row)
+
+
+@router.get(
+    "/{service_item_id}/customers",
+    response_model=ProviderCustomersPublic,
+)
+def list_queue_customers(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+) -> Any:
+    svc = _service_or_404(session, service_item_id)
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=svc.provider_id,
+    )
+    return customer_governance_service.list_provider_customers(
+        session, provider_id=svc.provider_id, service_item_id=service_item_id
+    )
+
+
+@router.post(
+    "/{service_item_id}/tickets/{ticket_id}/approve",
+    response_model=QueueEntryPublic,
+)
+def approve_join_request(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    ticket_id: uuid.UUID,
+    body: TicketApprovalBody | None = None,
+) -> Any:
+    svc = _service_or_404(session, service_item_id)
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=svc.provider_id,
+    )
+    order = body.queue_order if body else None
+    ticket = customer_governance_service.approve_ticket(
+        session,
+        service_item_id=service_item_id,
+        ticket_id=ticket_id,
+        approver=current_user,
+        queue_order=order,
+    )
+    notify_queue_subscribers(
+        session, service_item_id, ticket=ticket, reason="join_approved"
+    )
+    notifications_service.evaluate_smart_alerts_for_service_line(
+        session, service_item_id=service_item_id
+    )
+    return queue_entry_to_public(session, ticket)
+
+
+@router.post(
+    "/{service_item_id}/tickets/{ticket_id}/reject",
+    response_model=QueueEntryPublic,
+)
+def reject_join_request(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    ticket_id: uuid.UUID,
+) -> Any:
+    svc = _service_or_404(session, service_item_id)
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=svc.provider_id,
+    )
+    ticket = customer_governance_service.reject_ticket(
+        session, service_item_id=service_item_id, ticket_id=ticket_id
+    )
+    notify_queue_subscribers(
+        session, service_item_id, ticket=ticket, reason="join_rejected"
+    )
+    return queue_entry_to_public(session, ticket)
