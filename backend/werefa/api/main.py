@@ -4,6 +4,9 @@ from werefa.admin.interface.router import router as admin_platform_router
 from werefa.analytics.interface.router import (
     admin_router as analytics_admin_router,
 )
+from werefa.analytics.interface.provider_router import (
+    router as provider_analytics_router,
+)
 from werefa.analytics.interface.router import router as analytics_router
 from werefa.api.routes import private, utils
 from werefa.broadcasts.interface import router as broadcasts_router_module
@@ -42,6 +45,7 @@ api_router.include_router(utils.router)
 api_router.include_router(join_invites_router)
 api_router.include_router(analytics_router)
 api_router.include_router(analytics_admin_router)
+api_router.include_router(provider_analytics_router)
 api_router.include_router(admin_platform_router)
 api_router.include_router(providers_router.router)
 api_router.include_router(providers_me_router)

@@ -4,9 +4,11 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
 
+from werefa.queue.application import join_documents_service
 from werefa.queue.domain import ticket_rules
 from werefa.service_items.infrastructure import repo as service_item_repo
 from werefa.shared.models import (
+    JoinDocumentRequirement,
     Provider,
     QueueEntry,
     ServiceItem,
@@ -46,7 +48,21 @@ def update_service_item(
     row = session.get(ServiceItem, service_item_id)
     if row is None or row.provider_id != provider_id:
         raise HTTPException(status_code=404, detail="Service not found")
-    row.sqlmodel_update(body.model_dump(exclude_unset=True))
+    data = body.model_dump(exclude_unset=True)
+    raw_reqs = data.pop("join_document_requirements", None)
+    requires_docs = data.pop("requires_join_documents", None)
+    if raw_reqs is not None or requires_docs is not None:
+        parsed: list[JoinDocumentRequirement] | None = None
+        if raw_reqs is not None:
+            parsed = join_documents_service.parse_requirements(raw_reqs)
+        flag, payload = join_documents_service.validate_requirements_for_service(
+            row,
+            requires=requires_docs,
+            requirements=parsed,
+        )
+        data["requires_join_documents"] = flag
+        data["join_document_requirements"] = payload
+    row.sqlmodel_update(data)
     session.add(row)
     session.commit()
     session.refresh(row)

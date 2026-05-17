@@ -17,6 +17,7 @@ from werefa.realtime.domain.events import (
     BROADCAST_EVENT_TYPE,
     LINE_CHAT_EVENT_TYPE,
     NOTIFY_EVENT_TYPE,
+    QueueEventType,
     QueueEventV1,
 )
 from werefa.shared.models import QueueEntry, ServiceItem, User
@@ -60,6 +61,9 @@ def _message_for_ticket(message: str, ticket_id: uuid.UUID) -> bool:
             return uuid.UUID(str(raw.get("ticket_id"))) == ticket_id
         except (ValueError, TypeError):
             return False
+    if msg_type == QueueEventType.queue_updated:
+        # Line-wide refresh when anyone joins, leaves, or moves.
+        return True
     try:
         event = QueueEventV1.model_validate(raw)
     except ValidationError:

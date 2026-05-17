@@ -127,6 +127,7 @@ class NotifyEventV1(BaseModel):
         "liveness_ping_request",
         "liveness_stale",
         "line_chat_update",
+        "queue_cleared",
     ]
     position: int = Field(ge=1)
     body: str = Field(min_length=1, max_length=500)
