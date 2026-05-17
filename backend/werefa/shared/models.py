@@ -279,6 +279,11 @@ class MembershipPublic(SQLModel):
     role: str
 
 
+class ProviderMemberPublic(SQLModel):
+    membership: MembershipPublic
+    user: UserPublic
+
+
 # --- Service item (one FIFO line per row) ---
 
 

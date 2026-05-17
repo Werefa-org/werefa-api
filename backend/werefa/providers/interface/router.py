@@ -18,6 +18,7 @@ from werefa.shared.enums import UserType
 from werefa.shared.models import (
     MembershipCreate,
     MembershipPublic,
+    ProviderMemberPublic,
     MyProviderPublic,
     MyProvidersPublic,
     ProviderCreate,
@@ -224,7 +225,7 @@ def add_provider_member(
     return provider_service.add_provider_member(session, provider_id, body)
 
 
-@router.get("/{provider_id}/members", response_model=list[MembershipPublic])
+@router.get("/{provider_id}/members", response_model=list[ProviderMemberPublic])
 def list_provider_members(
     *,
     session: SessionDep,
@@ -234,7 +235,8 @@ def list_provider_members(
     ensure_provider_staff(
         session=session, current_user=current_user, provider_id=provider_id
     )
-    return provider_service.list_provider_members(session, provider_id)
+    rows = provider_service.list_provider_members(session, provider_id)
+    return [{"membership": m, "user": u} for m, u in rows]
 
 
 @router.delete(
