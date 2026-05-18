@@ -104,6 +104,7 @@ def list_discoverable_providers(
     longitude: float,
     radius_m: int | None,
     query: str | None,
+    city: str | None,
     include_private: bool,
     only_open: bool,
     include_paused: bool,
@@ -124,10 +125,17 @@ def list_discoverable_providers(
         statement = statement.where(
             col(Provider.verification_status) == VerificationStatus.verified.value
         )
+    if city:
+        c = city.strip()
+        if c:
+            statement = statement.where(col(Provider.city).ilike(f"%{c}%"))
     if query:
         q = f"%{query.lower()}%"
         statement = statement.where(
-            col(Provider.biz_name).ilike(q) | col(Provider.slug).ilike(q)
+            col(Provider.biz_name).ilike(q)
+            | col(Provider.slug).ilike(q)
+            | col(Provider.category).ilike(q)
+            | col(Provider.city).ilike(q)
         )
     if only_open:
         statement = statement.where(col(Provider.is_open).is_(True))
@@ -149,6 +157,23 @@ def list_discoverable_providers(
         pairs.append((p, distance))
     pairs.sort(key=lambda pair: pair[1])
     return pairs[offset : offset + limit]
+
+
+def list_discovery_cities(*, session: Session) -> list[str]:
+    """Distinct cities with at least one publicly discoverable provider."""
+    statement = (
+        select(Provider.city)
+        .where(col(Provider.latitude).is_not(None))
+        .where(col(Provider.longitude).is_not(None))
+        .where(col(Provider.is_private).is_(False))
+        .where(col(Provider.verification_status) == VerificationStatus.verified.value)
+        .where(col(Provider.city).is_not(None))
+        .where(col(Provider.city) != "")
+        .distinct()
+        .order_by(col(Provider.city))
+    )
+    rows = session.exec(statement).all()
+    return sorted({str(r).strip() for r in rows if r})
 
 
 def provider_active_ticket_counts(

@@ -278,6 +278,11 @@ class ProviderDiscoveriesPublic(SQLModel):
     count: int
 
 
+class DiscoveryCitiesPublic(SQLModel):
+    data: list[str]
+    count: int
+
+
 # --- Membership ---
 
 

@@ -276,6 +276,10 @@ def remove_provider_member(
     return row
 
 
+def list_discovery_cities(session: Session) -> list[str]:
+    return provider_repo.list_discovery_cities(session=session)
+
+
 def discover_providers(
     session: Session,
     *,
@@ -283,6 +287,7 @@ def discover_providers(
     longitude: float,
     radius_m: int | None,
     query: str | None,
+    city: str | None,
     include_private: bool,
     only_open: bool,
     include_paused: bool,
@@ -296,6 +301,7 @@ def discover_providers(
         longitude=longitude,
         radius_m=radius_m,
         query=query,
+        city=city,
         include_private=include_private,
         only_open=only_open,
         include_paused=include_paused,
