@@ -276,8 +276,12 @@ def remove_provider_member(
     return row
 
 
-def list_discovery_cities(session: Session) -> list[str]:
-    return provider_repo.list_discovery_cities(session=session)
+def list_discovery_regions(session: Session) -> list[str]:
+    return provider_repo.list_discovery_regions(session=session)
+
+
+def list_discovery_cities(session: Session, *, region: str | None = None) -> list[str]:
+    return provider_repo.list_discovery_cities(session=session, region=region)
 
 
 def discover_providers(
@@ -287,6 +291,7 @@ def discover_providers(
     longitude: float,
     radius_m: int | None,
     query: str | None,
+    region: str | None,
     city: str | None,
     include_private: bool,
     only_open: bool,
@@ -301,6 +306,7 @@ def discover_providers(
         longitude=longitude,
         radius_m=radius_m,
         query=query,
+        region=region,
         city=city,
         include_private=include_private,
         only_open=only_open,
@@ -337,6 +343,7 @@ def discover_providers(
                     "load_factor": load_factor,
                     "ratings_count": p.ratings_count or 0,
                     "rating_avg": rating_avg,
+                    "profile_image_url": profile_image_url_for_provider(p),
                 },
             )
         )
