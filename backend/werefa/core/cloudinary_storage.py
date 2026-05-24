@@ -136,16 +136,26 @@ def public_image_url(*, public_id: str, resource_type: str = "image") -> str:
 
 
 def delivery_url(*, public_id: str, resource_type: str) -> str:
+    """Signed URL for authenticated (private) uploads."""
     if not settings.cloudinary_configured:
         raise HTTPException(
             status_code=503,
             detail="Cloudinary is not configured on the server",
         )
     _configure()
-    return cloudinary.utils.cloudinary_url(
+    rt = resource_type if resource_type in ("image", "video", "raw") else "raw"
+    result = cloudinary.utils.cloudinary_url(
         public_id,
-        resource_type=resource_type,
+        resource_type=rt,
         type="authenticated",
         sign_url=True,
         secure=True,
     )
+    if isinstance(result, tuple):
+        return str(result[0])
+    return str(result)
+
+
+def signed_delivery_url(*, public_id: str, resource_type: str) -> str:
+    """Alias for :func:`delivery_url` (join documents, KYC files)."""
+    return delivery_url(public_id=public_id, resource_type=resource_type)

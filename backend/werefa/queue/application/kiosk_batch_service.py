@@ -58,6 +58,8 @@ def ingest_kiosk_walk_in_batch(
             status=TicketStatus.waiting.value,
             source=TicketSource.kiosk_walk_in.value,
             guest_name=item.guest_name,
+            guest_phone=item.guest_phone,
+            guest_email=item.guest_email,
         )
         session.add(ticket)
         created.append(ticket)

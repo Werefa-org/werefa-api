@@ -111,6 +111,7 @@ def queue_notification_subject(kind: str) -> str:
         "liveness_ping_request": "Share your location",
         "liveness_stale": "Location check needed",
         "line_chat_update": "New line chat message",
+        "queue_cleared": "Queue closed",
     }
     label = labels.get(kind, "Queue update")
     return f"{settings.PROJECT_NAME} — {label}"

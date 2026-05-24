@@ -100,11 +100,15 @@ def list_messages(
                 status_code=403,
                 detail="Line chat is only available with an active ticket on this line.",
             )
+    statement = select(LineChatMessage).where(
+        LineChatMessage.service_item_id == service_item_id
+    )
+    if svc.line_chat_cleared_at is not None:
+        statement = statement.where(
+            col(LineChatMessage.created_at) > svc.line_chat_cleared_at
+        )
     rows = session.exec(
-        select(LineChatMessage)
-        .where(LineChatMessage.service_item_id == service_item_id)
-        .order_by(col(LineChatMessage.created_at))
-        .limit(limit)
+        statement.order_by(col(LineChatMessage.created_at)).limit(limit)
     ).all()
     data = [to_line_chat_public(session, r, provider_id=svc.provider_id) for r in rows]
     return data, svc.line_chat_enabled

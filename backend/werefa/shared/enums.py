@@ -26,6 +26,22 @@ class TicketStatus(str, Enum):
     completed = "completed"
     no_show = "no_show"
     cancelled = "cancelled"
+    pending_approval = "pending_approval"
+
+
+class ApprovalQueueOrder(str, Enum):
+    """How approved remote joins are ordered in the FIFO line."""
+
+    preserve_register_time = "preserve_register_time"
+    approval_time = "approval_time"
+
+
+class JoinDocumentKind(str, Enum):
+    """Plain-language file types seekers may upload when joining."""
+
+    image = "image"
+    pdf = "pdf"
+    any = "any"
 
 
 class TicketSource(str, Enum):
@@ -68,6 +84,8 @@ class NotificationKind(str, Enum):
     liveness_stale = "liveness_stale"
     # Provider/staff posted in line chat.
     line_chat_update = "line_chat_update"
+    # Staff cleared the line for the day; ticket closed, joins paused.
+    queue_cleared = "queue_cleared"
 
 
 class NotificationChannel(str, Enum):
@@ -100,3 +118,4 @@ class DemandEventType(str, Enum):
     join_walk_in_batch = "join_walk_in_batch"
     service_view = "service_view"
     queue_abandon = "queue_abandon"
+    queue_cleared = "queue_cleared"

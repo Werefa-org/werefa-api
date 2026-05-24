@@ -43,6 +43,7 @@ EMAIL_COPY_KINDS: frozenset[NotificationKind] = frozenset(
         NotificationKind.liveness_ping_request,
         NotificationKind.liveness_stale,
         NotificationKind.line_chat_update,
+        NotificationKind.queue_cleared,
     }
 )
 

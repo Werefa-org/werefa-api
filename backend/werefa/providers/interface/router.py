@@ -13,6 +13,7 @@ from werefa.api.deps import (
     get_optional_current_user,
 )
 from werefa.providers.application import documents_service, service as provider_service
+from werefa.queue.application import customer_governance_service
 from werefa.providers.application.service import provider_public_view
 from werefa.shared.enums import UserType
 from werefa.shared.models import (
@@ -29,6 +30,8 @@ from werefa.shared.models import (
     ProviderRejectBody,
     ProviderStaffPublic,
     ProviderUpdate,
+    ProviderBanCreate,
+    ProviderCustomersPublic,
     User,
 )
 
@@ -160,6 +163,60 @@ def read_provider(*, session: SessionDep, provider_id: uuid.UUID) -> Any:
     if not p:
         raise HTTPException(status_code=404, detail="Provider not found")
     return ProviderPublic.model_validate(p, update=provider_public_view(p))
+
+
+@router.get("/{provider_id}/customers", response_model=ProviderCustomersPublic)
+def list_provider_customers(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+) -> Any:
+    ensure_provider_staff(
+        session=session, current_user=current_user, provider_id=provider_id
+    )
+    return customer_governance_service.list_provider_customers(
+        session, provider_id=provider_id
+    )
+
+
+@router.post("/{provider_id}/customers/ban", status_code=status.HTTP_204_NO_CONTENT)
+def ban_provider_customer(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+    body: ProviderBanCreate,
+) -> None:
+    ensure_provider_staff(
+        session=session, current_user=current_user, provider_id=provider_id
+    )
+    customer_governance_service.ban_customer(
+        session,
+        provider_id=provider_id,
+        user_id=body.user_id,
+        blocked_by_user_id=current_user.id,
+        reason=body.reason,
+    )
+
+
+@router.delete(
+    "/{provider_id}/customers/{user_id}/ban",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def unban_provider_customer(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> None:
+    ensure_provider_staff(
+        session=session, current_user=current_user, provider_id=provider_id
+    )
+    customer_governance_service.unban_customer(
+        session, provider_id=provider_id, user_id=user_id
+    )
 
 
 @router.post("/{provider_id}/profile-image", response_model=ProviderPublic)
