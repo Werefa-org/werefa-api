@@ -171,6 +171,7 @@ class ProviderBase(SQLModel):
     # Extended business profile
     category: str | None = Field(default=None, max_length=64)
     description: str | None = Field(default=None, max_length=1000)
+    region: str | None = Field(default=None, max_length=100)
     city: str | None = Field(default=None, max_length=100)
     address: str | None = Field(default=None, max_length=500)
     phone: str | None = Field(default=None, max_length=20)
@@ -195,6 +196,7 @@ class ProviderUpdate(SQLModel):
     access_code: str | None = Field(default=None, max_length=6)
     category: str | None = Field(default=None, max_length=64)
     description: str | None = Field(default=None, max_length=1000)
+    region: str | None = Field(default=None, max_length=100)
     city: str | None = Field(default=None, max_length=100)
     address: str | None = Field(default=None, max_length=500)
     phone: str | None = Field(default=None, max_length=20)
@@ -279,6 +281,11 @@ class ProviderDiscoveriesPublic(SQLModel):
 
 
 class DiscoveryCitiesPublic(SQLModel):
+    data: list[str]
+    count: int
+
+
+class DiscoveryRegionsPublic(SQLModel):
     data: list[str]
     count: int
 

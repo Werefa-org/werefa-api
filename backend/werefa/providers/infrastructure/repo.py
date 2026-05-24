@@ -104,6 +104,7 @@ def list_discoverable_providers(
     longitude: float,
     radius_m: int | None,
     query: str | None,
+    region: str | None,
     city: str | None,
     include_private: bool,
     only_open: bool,
@@ -125,10 +126,14 @@ def list_discoverable_providers(
         statement = statement.where(
             col(Provider.verification_status) == VerificationStatus.verified.value
         )
+    if region:
+        r = region.strip()
+        if r:
+            statement = statement.where(col(Provider.region) == r)
     if city:
         c = city.strip()
         if c:
-            statement = statement.where(col(Provider.city).ilike(f"%{c}%"))
+            statement = statement.where(col(Provider.city) == c)
     if query:
         q = f"%{query.lower()}%"
         statement = statement.where(
@@ -136,6 +141,7 @@ def list_discoverable_providers(
             | col(Provider.slug).ilike(q)
             | col(Provider.category).ilike(q)
             | col(Provider.city).ilike(q)
+            | col(Provider.region).ilike(q)
         )
     if only_open:
         statement = statement.where(col(Provider.is_open).is_(True))
@@ -159,19 +165,36 @@ def list_discoverable_providers(
     return pairs[offset : offset + limit]
 
 
-def list_discovery_cities(*, session: Session) -> list[str]:
-    """Distinct cities with at least one publicly discoverable provider."""
-    statement = (
-        select(Provider.city)
-        .where(col(Provider.latitude).is_not(None))
-        .where(col(Provider.longitude).is_not(None))
-        .where(col(Provider.is_private).is_(False))
-        .where(col(Provider.verification_status) == VerificationStatus.verified.value)
-        .where(col(Provider.city).is_not(None))
-        .where(col(Provider.city) != "")
-        .distinct()
-        .order_by(col(Provider.city))
+def _discoverable_base_filters():
+    return (
+        col(Provider.latitude).is_not(None),
+        col(Provider.longitude).is_not(None),
+        col(Provider.is_private).is_(False),
+        col(Provider.verification_status) == VerificationStatus.verified.value,
     )
+
+
+def list_discovery_regions(*, session: Session) -> list[str]:
+    statement = select(Provider.region).where(*_discoverable_base_filters())
+    statement = statement.where(col(Provider.region).is_not(None)).where(
+        col(Provider.region) != ""
+    )
+    statement = statement.distinct().order_by(col(Provider.region))
+    rows = session.exec(statement).all()
+    return sorted({str(r).strip() for r in rows if r})
+
+
+def list_discovery_cities(*, session: Session, region: str | None = None) -> list[str]:
+    """Distinct cities with at least one publicly discoverable provider."""
+    statement = select(Provider.city).where(*_discoverable_base_filters())
+    if region:
+        r = region.strip()
+        if r:
+            statement = statement.where(col(Provider.region) == r)
+    statement = statement.where(col(Provider.city).is_not(None)).where(
+        col(Provider.city) != ""
+    )
+    statement = statement.distinct().order_by(col(Provider.city))
     rows = session.exec(statement).all()
     return sorted({str(r).strip() for r in rows if r})
 

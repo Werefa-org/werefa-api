@@ -69,8 +69,10 @@ fastapi run werefa/main.py
 bash scripts/prestart.sh
 
 # Populate demo businesses, users, services, and sample queues (idempotent)
-uv run python scripts/seed_demo_data.py
-uv run python scripts/seed_demo_data.py --reset   # wipe demo-* slugs & *@example.com demo users first
+uv run python scripts/seed_demo_data.py --reset   # 15 providers (Addis/Adama), 5 seekers, flagship queue
+uv run python scripts/seed_demo_data.py --reset --skip-images   # faster without Cloudinary logos
+
+Demo logins (password = email): `user1@example.com` … `user5@example.com`, `provider1@example.com` … `provider15@example.com`
 
 # Lint + type checks
 bash scripts/lint.sh
@@ -121,11 +123,19 @@ Important optional variables:
 
 ## Migrations
 
-From `backend/`:
+From `backend/` with the project virtualenv active and dependencies installed:
 
 ```bash
-alembic upgrade head
-alembic revision --autogenerate -m "your migration message"
+# If `alembic` is not on PATH, use the module form:
+python -m alembic upgrade head
+python -m alembic revision --autogenerate -m "your migration message"
+```
+
+Install deps first if needed (from `backend/`):
+
+```bash
+pip install -e .
+# or: uv sync
 ```
 
 ## Deployment
