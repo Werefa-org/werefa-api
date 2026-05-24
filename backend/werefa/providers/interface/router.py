@@ -24,6 +24,7 @@ from werefa.shared.models import (
     MyProvidersPublic,
     ProviderCreate,
     ProviderDiscoveriesPublic,
+    DiscoveryCitiesPublic,
     ProviderDocument,
     ProviderDocumentPublic,
     ProviderPublic,
@@ -38,6 +39,12 @@ from werefa.shared.models import (
 router = APIRouter(prefix="/providers", tags=["providers"])
 
 
+@router.get("/discover/cities", response_model=DiscoveryCitiesPublic)
+def list_discovery_cities(*, session: SessionDep) -> Any:
+    cities = provider_service.list_discovery_cities(session)
+    return DiscoveryCitiesPublic(data=cities, count=len(cities))
+
+
 @router.get("/discover", response_model=ProviderDiscoveriesPublic)
 def discover_providers(
     *,
@@ -47,6 +54,7 @@ def discover_providers(
     longitude: float = Query(..., ge=-180, le=180),
     radius_m: int | None = Query(default=None, ge=1),
     query: str | None = Query(default=None, min_length=1, max_length=120),
+    city: str | None = Query(default=None, min_length=1, max_length=100),
     include_private: bool = False,
     only_open: bool = True,
     include_paused: bool = False,
@@ -67,6 +75,7 @@ def discover_providers(
         longitude=longitude,
         radius_m=radius_m,
         query=query,
+        city=city,
         include_private=include_private,
         only_open=only_open,
         include_paused=include_paused,
