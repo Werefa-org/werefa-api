@@ -15,6 +15,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
+from werefa.broadcasts.application.serializers import _author_role_and_label
 from werefa.broadcasts.infrastructure import repo as broadcasts_repo
 from werefa.realtime.notify import notify_broadcast_subscribers
 from werefa.shared.enums import BroadcastSeverity, TicketStatus
@@ -142,11 +143,18 @@ def create_broadcast(
         ).all()
         target_service_items = [cast(uuid.UUID, sid) for sid in rows]
 
+    author_role, author_label = _author_role_and_label(
+        session,
+        provider_id=provider_id,
+        author_user_id=author_user_id,
+    )
     notify_broadcast_subscribers(
         broadcast_id=row.id,
         provider_id=provider_id,
         body_text=row.body,
         severity=severity,
+        author_role=author_role,
+        author_label=author_label,
         # `target_service_items` reflects what the realtime layer will see;
         # the persisted record retains the original `service_item_id` (None
         # when provider-wide) so historical queries remain truthful.

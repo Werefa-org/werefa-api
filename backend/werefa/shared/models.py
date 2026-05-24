@@ -130,6 +130,8 @@ class User(UserBase, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    profile_image_public_id: str | None = Field(default=None, max_length=500)
+    profile_image_resource_type: str | None = Field(default=None, max_length=16)
 
 
 class UserPublic(UserBase):
@@ -137,6 +139,7 @@ class UserPublic(UserBase):
     created_at: datetime | None = None
     joins_blocked_until: datetime | None = None
     notification_prefs: list[str] | None = None
+    profile_image_url: str | None = None
 
 
 class UsersPublic(SQLModel):
@@ -159,6 +162,15 @@ class ProviderBase(SQLModel):
     latitude: float | None = None
     longitude: float | None = None
     is_private: bool = False
+    # Extended business profile
+    category: str | None = Field(default=None, max_length=64)
+    description: str | None = Field(default=None, max_length=1000)
+    city: str | None = Field(default=None, max_length=100)
+    address: str | None = Field(default=None, max_length=500)
+    phone: str | None = Field(default=None, max_length=20)
+    show_phone_public: bool = False
+    website: str | None = Field(default=None, max_length=200)
+    biz_email: str | None = Field(default=None, max_length=255)
 
 
 class ProviderCreate(ProviderBase):
@@ -175,6 +187,14 @@ class ProviderUpdate(SQLModel):
     longitude: float | None = None
     is_private: bool | None = None
     access_code: str | None = Field(default=None, max_length=6)
+    category: str | None = Field(default=None, max_length=64)
+    description: str | None = Field(default=None, max_length=1000)
+    city: str | None = Field(default=None, max_length=100)
+    address: str | None = Field(default=None, max_length=500)
+    phone: str | None = Field(default=None, max_length=20)
+    show_phone_public: bool | None = None
+    website: str | None = Field(default=None, max_length=200)
+    biz_email: str | None = Field(default=None, max_length=255)
 
 
 class Provider(ProviderBase, table=True):
@@ -203,6 +223,8 @@ class Provider(ProviderBase, table=True):
         back_populates="provider", cascade_delete=True
     )
     last_rejection_reason: str | None = Field(default=None, max_length=1000)
+    profile_image_public_id: str | None = Field(default=None, max_length=500)
+    profile_image_resource_type: str | None = Field(default=None, max_length=16)
 
 
 class ProviderPublic(ProviderBase):
@@ -210,6 +232,7 @@ class ProviderPublic(ProviderBase):
     created_at: datetime | None = None
     ratings_count: int = 0
     rating_avg: float | None = None
+    profile_image_url: str | None = None
 
 
 class ProviderStaffPublic(ProviderPublic):
@@ -292,6 +315,14 @@ class ServiceItemBase(SQLModel):
     avg_duration_minutes: int = Field(ge=1, le=24 * 60)
     price: Decimal = Field(sa_column=Column(Numeric(10, 2), nullable=False))
     is_active: bool = True
+    description: str | None = Field(default=None, max_length=1000)
+    requirements: str | None = Field(default=None, max_length=500)
+    category: str | None = Field(default=None, max_length=64)
+    is_paused: bool = False
+    is_private: bool = False
+    allow_vip: bool = False
+    vip_code: str | None = Field(default=None, max_length=20)
+    line_chat_enabled: bool = True
 
 
 class ServiceItemCreate(ServiceItemBase):
@@ -303,6 +334,14 @@ class ServiceItemUpdate(SQLModel):
     avg_duration_minutes: int | None = Field(default=None, ge=1, le=24 * 60)
     price: Decimal | None = None
     is_active: bool | None = None
+    description: str | None = Field(default=None, max_length=1000)
+    requirements: str | None = Field(default=None, max_length=500)
+    category: str | None = Field(default=None, max_length=64)
+    is_paused: bool | None = None
+    is_private: bool | None = None
+    allow_vip: bool | None = None
+    vip_code: str | None = Field(default=None, max_length=20)
+    line_chat_enabled: bool | None = None
 
 
 class ServiceItem(ServiceItemBase, table=True):
@@ -331,6 +370,7 @@ class QueueEntryBase(SQLModel):
     status: str = Field(default=TicketStatus.waiting.value, max_length=32)
     source: str = Field(max_length=32)
     guest_name: str | None = Field(default=None, max_length=100)
+    priority: int = Field(default=0, ge=0, le=10)
 
 
 class QueueEntry(QueueEntryBase, table=True):
@@ -423,6 +463,7 @@ class QueueJoin(SQLModel):
         max_length=64,
         description="FR-02: optional QR/deep-link token for this service line.",
     )
+    vip_code: str | None = Field(default=None, max_length=20)
 
     @model_validator(mode="after")
     def _coords_paired(self) -> Self:
@@ -433,10 +474,15 @@ class QueueJoin(SQLModel):
 
 class WalkInCreate(SQLModel):
     guest_name: str | None = Field(default=None, max_length=100)
+    is_vip: bool = False
 
 
 class TicketStatusUpdate(SQLModel):
     status: TicketStatus
+
+
+class TicketPriorityUpdate(SQLModel):
+    priority: int = Field(ge=0, le=10)
 
 
 class WalkInBatchItem(SQLModel):
@@ -463,11 +509,38 @@ class JoinInviteResolved(SQLModel):
 class QueueEntryPublic(QueueEntryBase):
     id: uuid.UUID
     service_item_id: uuid.UUID
+    provider_id: uuid.UUID | None = None
     user_id: uuid.UUID | None = None
     joined_at: datetime | None = None
     completed_at: datetime | None = None
     liveness_state: str = Field(default=LivenessState.idle.value, max_length=16)
     liveness_deadline_at: datetime | None = None
+
+
+class QueueAheadPreview(SQLModel):
+    ticket_number: int = Field(ge=1)
+    position: int = Field(ge=1)
+    is_vip: bool = False
+    is_you: bool = False
+
+
+class TicketQueueSnapshot(SQLModel):
+    service_item_id: uuid.UUID
+    service_name: str
+    provider_id: uuid.UUID
+    biz_name: str
+    profile_image_url: str | None = None
+    avg_duration_minutes: int = Field(ge=1)
+    waiting_count: int = Field(ge=0)
+    serving_count: int = Field(ge=0)
+    vip_waiting_count: int = Field(ge=0)
+    your_ticket_id: uuid.UUID
+    your_ticket_number: int = Field(ge=1)
+    your_position: int | None = Field(default=None, ge=1)
+    people_ahead: int = Field(ge=0)
+    estimated_wait_minutes: int | None = None
+    pace_note: str = Field(max_length=200)
+    ahead_preview: list[QueueAheadPreview] = Field(default_factory=list)
 
 
 class KioskSyncBatchIn(SQLModel):
@@ -668,12 +741,56 @@ class BroadcastPublic(BroadcastMessageBase):
     provider_id: uuid.UUID
     service_item_id: uuid.UUID | None = None
     author_user_id: uuid.UUID
+    author_role: str = Field(default=MembershipRole.staff.value, max_length=32)
+    author_label: str = Field(default="Business", max_length=200)
     created_at: datetime | None = None
 
 
 class BroadcastsPublic(SQLModel):
     data: list[BroadcastPublic]
     count: int
+
+
+# --- Line chat (per service queue) ---
+
+
+class LineChatMessageBase(SQLModel):
+    body: str = Field(min_length=1, max_length=500)
+
+
+class LineChatCreate(LineChatMessageBase):
+    pass
+
+
+class LineChatMessage(LineChatMessageBase, table=True):
+    __tablename__ = "line_chat_message"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    service_item_id: uuid.UUID = Field(
+        foreign_key="service_item.id", ondelete="CASCADE", index=True
+    )
+    author_user_id: uuid.UUID = Field(
+        foreign_key="user.id", ondelete="CASCADE", index=True
+    )
+    created_at: datetime | None = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class LineChatMessagePublic(LineChatMessageBase):
+    id: uuid.UUID
+    service_item_id: uuid.UUID
+    author_user_id: uuid.UUID
+    author_role: str = Field(default="seeker", max_length=32)
+    author_label: str = Field(default="Guest", max_length=200)
+    created_at: datetime | None = None
+
+
+class LineChatMessagesPublic(SQLModel):
+    data: list[LineChatMessagePublic]
+    count: int
+    line_chat_enabled: bool = True
 
 
 # --- Notifications (FR-07) ---
@@ -732,6 +849,11 @@ class NotificationPublic(NotificationBase):
 class NotificationsPublic(SQLModel):
     data: list[NotificationPublic]
     count: int
+    unread_count: int = 0
+
+
+class NotificationUnreadCount(SQLModel):
+    unread_count: int
 
 
 class NotificationPrefsUpdate(SQLModel):
@@ -851,7 +973,9 @@ class ProviderDocument(SQLModel, table=True):
     )
     filename: str = Field(max_length=255)
     content_type: str = Field(max_length=120)
+    # Cloudinary ``public_id`` (legacy column name kept to avoid a migration).
     storage_relpath: str = Field(max_length=500)
+    resource_type: str = Field(default="raw", max_length=16)
     created_at: datetime | None = Field(
         default_factory=utcnow,
         sa_column=Column(DateTime(timezone=True), nullable=True),
@@ -864,6 +988,7 @@ class ProviderDocumentPublic(SQLModel):
     filename: str
     content_type: str
     created_at: datetime | None = None
+    url: str
 
 
 # --- Admin ---

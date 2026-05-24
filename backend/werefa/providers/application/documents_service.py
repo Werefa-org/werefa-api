@@ -1,23 +1,22 @@
-"""KYC document storage (UC-10)."""
+"""Provider KYC documents — stored in Cloudinary."""
 
 from __future__ import annotations
 
-import re
 import uuid
-from pathlib import Path
 
-from fastapi import HTTPException, UploadFile, status
+from fastapi import HTTPException, UploadFile
 from sqlmodel import Session, col, select
 
+from werefa.core import cloudinary_storage
 from werefa.core.config import settings
 from werefa.shared.models import ProviderDocument, ProviderDocumentPublic, User
 
-_SAFE_NAME = re.compile(r"[^a-zA-Z0-9._-]+")
+_MAX_FILENAME_LEN = 120
 
 
 def _safe_filename(name: str) -> str:
-    base = _SAFE_NAME.sub("_", name.strip())[:120]
-    return base or "upload"
+    base = "".join(c if c.isalnum() or c in "._-" else "_" for c in name.strip())
+    return (base[:_MAX_FILENAME_LEN] or "document")
 
 
 def store_provider_document(
@@ -28,25 +27,20 @@ def store_provider_document(
     upload: UploadFile,
 ) -> ProviderDocument:
     raw_name = upload.filename or "document"
-    fname = _safe_filename(raw_name)
-    doc_id = uuid.uuid4()
-    root = Path(settings.KYC_DOCUMENTS_DIR).resolve()
-    dest_dir = root / str(provider_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    rel = f"{provider_id}/{doc_id}_{fname}"
-    dest = root / rel
     content = upload.file.read()
-    if len(content) > 15 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large (max 15MB)")
-    dest.write_bytes(content)
-    ct = upload.content_type or "application/octet-stream"
+    stored = cloudinary_storage.upload_bytes(
+        data=content,
+        filename=_safe_filename(raw_name),
+        folder=f"{settings.CLOUDINARY_FOLDER}/{provider_id}",
+    )
     row = ProviderDocument(
-        id=doc_id,
+        id=uuid.uuid4(),
         provider_id=provider_id,
         uploaded_by_user_id=uploader.id,
         filename=raw_name[:255],
-        content_type=ct[:120],
-        storage_relpath=rel,
+        content_type=(upload.content_type or "application/octet-stream")[:120],
+        storage_relpath=stored.public_id,
+        resource_type=stored.resource_type[:16],
     )
     session.add(row)
     session.commit()
@@ -65,19 +59,16 @@ def list_documents(
     return list(rows)
 
 
-def get_document_path(
+def get_delivery_url(
     session: Session, *, provider_id: uuid.UUID, doc_id: uuid.UUID
-) -> Path:
+) -> str:
     row = session.get(ProviderDocument, doc_id)
     if row is None or row.provider_id != provider_id:
         raise HTTPException(status_code=404, detail="Document not found")
-    root = Path(settings.KYC_DOCUMENTS_DIR).resolve()
-    path = (root / row.storage_relpath).resolve()
-    if not str(path).startswith(str(root)):
-        raise HTTPException(status_code=404, detail="Invalid storage path")
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="File missing on disk")
-    return path
+    return cloudinary_storage.delivery_url(
+        public_id=row.storage_relpath,
+        resource_type=row.resource_type,
+    )
 
 
 def document_public(row: ProviderDocument) -> ProviderDocumentPublic:
@@ -87,4 +78,8 @@ def document_public(row: ProviderDocument) -> ProviderDocumentPublic:
         filename=row.filename,
         content_type=row.content_type,
         created_at=row.created_at,
+        url=cloudinary_storage.delivery_url(
+            public_id=row.storage_relpath,
+            resource_type=row.resource_type,
+        ),
     )

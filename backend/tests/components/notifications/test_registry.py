@@ -180,6 +180,25 @@ def test_dispatch_skips_unknown_channel_keys() -> None:
     assert email.calls and not log.calls
 
 
+def test_dispatch_sends_email_copy_when_websocket_wins() -> None:
+    ws = _FakeNotifier(NotificationChannel.websocket, deliverable=True)
+    email = _FakeNotifier(NotificationChannel.email, deliverable=True)
+    log = _FakeNotifier(NotificationChannel.logger, deliverable=True)
+    _set_registry(ws, email, log)
+
+    user = _FakeUser(notification_prefs=["websocket", "email", "logger"])
+    session = _RecordingSession()
+    row = notifications_service.dispatch(
+        session=session,  # type: ignore[arg-type]
+        user=user,  # type: ignore[arg-type]
+        payload=_payload(),
+    )
+    assert row is not None
+    assert row.channel == NotificationChannel.websocket.value
+    assert len(ws.calls) == 1
+    assert len(email.calls) == 1
+
+
 def test_dispatch_uses_default_prefs_when_user_has_none() -> None:
     email = _FakeNotifier(NotificationChannel.email, deliverable=True)
     log = _FakeNotifier(NotificationChannel.logger, deliverable=True)

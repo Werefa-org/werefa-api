@@ -82,6 +82,45 @@ def generate_reset_password_email(email_to: str, email: str, token: str) -> Emai
     return EmailData(html_content=html_content, subject=subject)
 
 
+def generate_queue_notification_email(
+    *,
+    email_to: str,
+    subject: str,
+    body: str,
+    ticket_link: str | None = None,
+    position: int | None = None,
+) -> EmailData:
+    html_content = render_email_template(
+        template_name="queue_notification.html",
+        context={
+            "subject": subject,
+            "body": body,
+            "ticket_link": ticket_link,
+            "position": position,
+            "project_name": settings.PROJECT_NAME,
+        },
+    )
+    return EmailData(html_content=html_content, subject=subject)
+
+
+def queue_notification_subject(kind: str) -> str:
+    labels = {
+        "head_to_counter": "Head to the counter soon",
+        "you_are_next": "You're next in line",
+        "now_serving": "You're being served now",
+        "liveness_ping_request": "Share your location",
+        "liveness_stale": "Location check needed",
+        "line_chat_update": "New line chat message",
+    }
+    label = labels.get(kind, "Queue update")
+    return f"{settings.PROJECT_NAME} — {label}"
+
+
+def ticket_deep_link(ticket_id: str) -> str:
+    base = (settings.FRONTEND_HOST or "").rstrip("/")
+    return f"{base}/me/tickets/{ticket_id}"
+
+
 def generate_new_account_email(
     email_to: str, username: str, password: str
 ) -> EmailData:

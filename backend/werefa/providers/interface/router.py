@@ -2,7 +2,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import RedirectResponse
 
 from werefa.api.deps import (
     CurrentUser,
@@ -162,6 +162,23 @@ def read_provider(*, session: SessionDep, provider_id: uuid.UUID) -> Any:
     return ProviderPublic.model_validate(p, update=provider_public_view(p))
 
 
+@router.post("/{provider_id}/profile-image", response_model=ProviderPublic)
+async def upload_provider_profile_image(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+    file: UploadFile = File(...),
+) -> Any:
+    ensure_provider_staff(
+        session=session, current_user=current_user, provider_id=provider_id
+    )
+    p = await provider_service.upload_provider_profile_image(
+        session, provider_id=provider_id, upload=file
+    )
+    return ProviderPublic.model_validate(p, update=provider_public_view(p))
+
+
 @router.patch("/{provider_id}", response_model=ProviderPublic)
 def update_provider(
     *,
@@ -293,17 +310,10 @@ def download_provider_document(
             current_user=current_user,
             provider_id=provider_id,
         )
-    row = session.get(ProviderDocument, doc_id)
-    if row is None or row.provider_id != provider_id:
-        raise HTTPException(status_code=404, detail="Document not found")
-    path = documents_service.get_document_path(
+    url = documents_service.get_delivery_url(
         session, provider_id=provider_id, doc_id=doc_id
     )
-    return FileResponse(
-        path,
-        media_type=row.content_type,
-        filename=row.filename,
-    )
+    return RedirectResponse(url=url, status_code=307)
 
 
 me_router = APIRouter(prefix="/users/me/providers", tags=["providers"])

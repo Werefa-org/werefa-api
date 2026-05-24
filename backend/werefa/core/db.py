@@ -4,7 +4,10 @@ from werefa.core.config import settings
 from werefa.identity.infrastructure import repo as identity_repo
 from werefa.shared.models import User, UserCreate
 
-engine = create_engine(str(settings.SQLALCHEMY_DATABASE_URI))
+engine = create_engine(
+    str(settings.SQLALCHEMY_DATABASE_URI),
+    pool_pre_ping=True,
+)
 
 
 # make sure all SQLModel models are imported (werefa.models) before initializing DB

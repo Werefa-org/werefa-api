@@ -1,15 +1,18 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 from sqlmodel import col, select
 
 from werefa.api.deps import CurrentUser, SessionDep, ensure_provider_staff
 from werefa.notifications.application import service as notifications_service
 from werefa.queue.application import join_invite_service
+from werefa.queue.application import line_chat_service
 from werefa.queue.application import liveness_service
+from werefa.queue.application import snapshot_service
 from werefa.queue.application import kiosk_batch_service
 from werefa.queue.application import service as queue_service
+from werefa.queue.application.serializers import queue_entry_to_public
 from werefa.realtime.notify import notify_queue_subscribers
 from werefa.shared.enums import TicketStatus
 from werefa.shared.models import (
@@ -17,6 +20,9 @@ from werefa.shared.models import (
     JoinInviteCreated,
     KioskSyncBatchIn,
     KioskSyncBatchOut,
+    LineChatCreate,
+    LineChatMessagePublic,
+    LineChatMessagesPublic,
     LivenessPublic,
     PositionPingCreate,
     QueueEntriesPublic,
@@ -24,6 +30,8 @@ from werefa.shared.models import (
     QueueEntryPublic,
     QueueJoin,
     ServiceItem,
+    TicketPriorityUpdate,
+    TicketQueueSnapshot,
     TicketStatusUpdate,
     WalkInCreate,
 )
@@ -51,7 +59,7 @@ def my_active_tickets(*, session: SessionDep, current_user: CurrentUser) -> Any:
         .order_by(col(QueueEntry.joined_at))
     )
     rows = session.exec(statement).all()
-    data = [QueueEntryPublic.model_validate(r) for r in rows]
+    data = [queue_entry_to_public(session, r) for r in rows]
     return QueueEntriesPublic(data=data, count=len(data))
 
 
@@ -72,6 +80,7 @@ def join_queue(
         latitude=body.latitude,
         longitude=body.longitude,
         invite_token=body.invite_token,
+        vip_code=body.vip_code,
     )
     notify_queue_subscribers(
         session, service_item_id, ticket=ticket, reason="join"
@@ -142,6 +151,7 @@ def submit_position_ping(
     *,
     session: SessionDep,
     current_user: CurrentUser,
+    background_tasks: BackgroundTasks,
     service_item_id: uuid.UUID,
     ticket_id: uuid.UUID,
     body: PositionPingCreate,
@@ -167,10 +177,71 @@ def submit_position_ping(
     notify_queue_subscribers(
         session, service_item_id, ticket=row, reason="liveness_ping"
     )
-    notifications_service.evaluate_smart_alerts_for_service_line(
-        session, service_item_id=service_item_id
+    background_tasks.add_task(
+        notifications_service.run_evaluate_smart_alerts_for_service_line,
+        service_item_id,
     )
     return QueueEntryPublic.model_validate(row)
+
+
+@router.get(
+    "/{service_item_id}/chat/messages",
+    response_model=LineChatMessagesPublic,
+)
+def list_line_chat_messages(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+) -> Any:
+    _service_or_404(session, service_item_id)
+    rows, enabled = line_chat_service.list_messages(
+        session, service_item_id=service_item_id, user=current_user
+    )
+    return LineChatMessagesPublic(
+        data=rows, count=len(rows), line_chat_enabled=enabled
+    )
+
+
+@router.post(
+    "/{service_item_id}/chat/messages",
+    response_model=LineChatMessagePublic,
+    status_code=status.HTTP_201_CREATED,
+)
+def post_line_chat_message(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    body: LineChatCreate,
+) -> Any:
+    _service_or_404(session, service_item_id)
+    return line_chat_service.post_message(
+        session,
+        service_item_id=service_item_id,
+        user=current_user,
+        body=body,
+    )
+
+
+@router.get(
+    "/{service_item_id}/tickets/{ticket_id}/snapshot",
+    response_model=TicketQueueSnapshot,
+)
+def read_ticket_queue_snapshot(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    ticket_id: uuid.UUID,
+) -> Any:
+    _service_or_404(session, service_item_id)
+    return snapshot_service.build_ticket_queue_snapshot(
+        session,
+        service_item_id=service_item_id,
+        ticket_id=ticket_id,
+        user=current_user,
+    )
 
 
 @router.get(
@@ -232,6 +303,7 @@ def register_walk_in(
         session,
         service_item_id=service_item_id,
         guest_name=body.guest_name,
+        is_vip=body.is_vip,
     )
     notify_queue_subscribers(
         session, service_item_id, ticket=ticket, reason="walk_in"
@@ -239,6 +311,35 @@ def register_walk_in(
     notifications_service.evaluate_smart_alerts_for_service_line(
         session, service_item_id=service_item_id
     )
+    return QueueEntryPublic.model_validate(ticket)
+
+
+@router.patch(
+    "/{service_item_id}/tickets/{ticket_id}/priority",
+    response_model=QueueEntryPublic,
+)
+def set_ticket_priority(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    ticket_id: uuid.UUID,
+    body: TicketPriorityUpdate,
+) -> Any:
+    """Staff can manually promote a ticket to VIP (priority=1) or demote it (priority=0)."""
+    svc = _service_or_404(session, service_item_id)
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=svc.provider_id,
+    )
+    ticket = queue_service.set_ticket_priority(
+        session,
+        service_item_id=service_item_id,
+        ticket_id=ticket_id,
+        priority=body.priority,
+    )
+    notify_queue_subscribers(session, service_item_id, ticket=ticket, reason="priority_change")
     return QueueEntryPublic.model_validate(ticket)
 
 
@@ -281,6 +382,9 @@ def call_next(
     if nxt is not None:
         notify_queue_subscribers(
             session, service_item_id, ticket=nxt, reason="call_next"
+        )
+        notifications_service.notify_ticket_now_serving(
+            session, ticket=nxt, service_item_id=service_item_id
         )
     if current is None and nxt is None:
         notify_queue_subscribers(session, service_item_id, reason="call_next")

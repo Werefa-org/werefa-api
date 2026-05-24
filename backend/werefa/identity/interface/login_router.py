@@ -33,7 +33,7 @@ def login_otp_verify(session: SessionDep, body: OtpVerify) -> Token:
 
 @router.post("/login/test-token", response_model=UserPublic)
 def test_token(current_user: CurrentUser) -> Any:
-    return current_user
+    return identity_service.to_user_public(current_user)
 
 
 @router.post("/password-recovery/{email}")

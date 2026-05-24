@@ -1,9 +1,11 @@
 import uuid
 
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 from sqlmodel import Session, col, select
 
+from werefa.core import cloudinary_storage
 from werefa.core.config import settings
+from werefa.core.image_upload import read_image_upload
 from werefa.providers.domain import membership_rules
 from werefa.providers.infrastructure import repo as provider_repo
 from werefa.queue.application.ewt import (
@@ -111,6 +113,15 @@ def get_provider(session: Session, provider_id: uuid.UUID) -> Provider | None:
     return session.get(Provider, provider_id)
 
 
+def profile_image_url_for_provider(p: Provider) -> str | None:
+    if not p.profile_image_public_id:
+        return None
+    return cloudinary_storage.public_image_url(
+        public_id=p.profile_image_public_id,
+        resource_type=p.profile_image_resource_type or "image",
+    )
+
+
 def provider_public_view(p: Provider) -> dict:
     """Derived fields shared by every provider read path.
 
@@ -119,7 +130,34 @@ def provider_public_view(p: Provider) -> dict:
     """
     count = p.ratings_count or 0
     rating_avg = round((p.ratings_sum or 0) / count, 2) if count > 0 else None
-    return {"ratings_count": count, "rating_avg": rating_avg}
+    return {
+        "ratings_count": count,
+        "rating_avg": rating_avg,
+        "profile_image_url": profile_image_url_for_provider(p),
+    }
+
+
+async def upload_provider_profile_image(
+    session: Session,
+    *,
+    provider_id: uuid.UUID,
+    upload: UploadFile,
+) -> Provider:
+    p = session.get(Provider, provider_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    data, ext = await read_image_upload(upload)
+    stored = cloudinary_storage.upload_public_image(
+        data=data,
+        folder=f"{settings.CLOUDINARY_AVATARS_FOLDER}/providers/{provider_id}",
+        asset_name=f"avatar.{ext}",
+    )
+    p.profile_image_public_id = stored.public_id
+    p.profile_image_resource_type = stored.resource_type
+    session.add(p)
+    session.commit()
+    session.refresh(p)
+    return p
 
 
 def list_providers_for_user(

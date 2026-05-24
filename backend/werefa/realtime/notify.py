@@ -6,7 +6,11 @@ from collections.abc import Iterable
 from sqlalchemy import func
 from sqlmodel import Session, col, select
 
-from werefa.realtime.domain.events import BroadcastEventV1, QueueEventV1
+from werefa.realtime.domain.events import (
+    BroadcastEventV1,
+    LineChatEventV1,
+    QueueEventV1,
+)
 from werefa.shared.enums import TicketStatus
 from werefa.shared.models import QueueEntry, utcnow
 
@@ -73,6 +77,8 @@ def notify_broadcast_subscribers(
     provider_id: uuid.UUID,
     body_text: str,
     severity: str,
+    author_role: str = "staff",
+    author_label: str = "Business",
     service_item_ids: Iterable[uuid.UUID],
     original_service_item_id: uuid.UUID | None,
 ) -> None:
@@ -90,6 +96,7 @@ def notify_broadcast_subscribers(
 
     occurred_at = utcnow()
     for sid in service_item_ids:
+        role: str = author_role if author_role in ("owner", "staff") else "staff"
         event = BroadcastEventV1(
             broadcast_id=broadcast_id,
             provider_id=provider_id,
@@ -99,6 +106,8 @@ def notify_broadcast_subscribers(
             service_item_id=sid if original_service_item_id is not None else sid,
             body=body_text,
             severity=_severity_literal(severity),
+            author_role=role,  # type: ignore[arg-type]
+            author_label=author_label,
             occurred_at=occurred_at,
         )
         text = event.model_dump_json()
@@ -113,6 +122,46 @@ def notify_broadcast_subscribers(
                 logger.exception("Broadcast fan-out task failed")
 
         task.add_done_callback(_log_done)
+
+
+def notify_line_chat_subscribers(
+    *,
+    message_id: uuid.UUID,
+    service_item_id: uuid.UUID,
+    body_text: str,
+    author_role: str,
+    author_label: str,
+    author_user_id: uuid.UUID,
+) -> None:
+    from werefa.realtime import lifespan
+
+    c = lifespan.coordinator
+    loop = lifespan.main_event_loop
+    if c is None or loop is None or not loop.is_running():
+        return
+
+    occurred_at = utcnow()
+    event = LineChatEventV1(
+        message_id=message_id,
+        service_item_id=service_item_id,
+        author_user_id=author_user_id,
+        body=body_text,
+        author_role=author_role[:32],
+        author_label=author_label[:200],
+        occurred_at=occurred_at,
+    )
+    text = event.model_dump_json()
+    task = loop.create_task(c.publish(service_item_id, text))
+
+    def _log_done(done: asyncio.Task[object]) -> None:
+        try:
+            done.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("Line chat fan-out task failed")
+
+    task.add_done_callback(_log_done)
 
 
 def _severity_literal(value: str) -> str:
