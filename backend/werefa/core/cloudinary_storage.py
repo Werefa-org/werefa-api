@@ -12,6 +12,31 @@ from fastapi import HTTPException
 
 from werefa.core.config import settings
 
+_IMAGE_EXTENSIONS = frozenset({"jpg", "jpeg", "png", "webp", "gif"})
+
+
+def _asset_public_id_name(asset_name: str) -> str:
+    """Strip a trailing image extension so Cloudinary does not double-append it."""
+    if "." in asset_name:
+        stem, ext = asset_name.rsplit(".", 1)
+        if ext.lower() in _IMAGE_EXTENSIONS:
+            return stem
+    return asset_name
+
+
+def _delivery_public_id(public_id: str) -> str:
+    """Map stored public_id to the path Cloudinary serves.
+
+    Legacy uploads used names like ``logo.jpg`` as the public_id; delivery URLs
+  then end in ``logo.jpg.jpg``. New uploads store extension-less ids (``logo``).
+    """
+    name = public_id.rsplit("/", 1)[-1]
+    if "." in name:
+        _stem, ext = name.rsplit(".", 1)
+        if ext.lower() in _IMAGE_EXTENSIONS:
+            return f"{public_id}.{ext.lower()}"
+    return public_id
+
 
 @dataclass(frozen=True)
 class StoredFile:
@@ -100,7 +125,7 @@ def upload_public_image(
         result = cloudinary.uploader.upload(
             data,
             folder=folder,
-            public_id=asset_name,
+            public_id=_asset_public_id_name(asset_name),
             resource_type="image",
             overwrite=True,
             invalidate=True,
@@ -129,7 +154,8 @@ def public_image_url(*, public_id: str, resource_type: str = "image") -> str:
             detail="Cloudinary is not configured on the server",
         )
     _configure()
-    return cloudinary.CloudinaryImage(public_id).build_url(
+    delivery_id = _delivery_public_id(public_id)
+    return cloudinary.CloudinaryImage(delivery_id).build_url(
         secure=True,
         resource_type=resource_type,
     )

@@ -6,9 +6,11 @@ from pydantic import (
     AnyUrl,
     BeforeValidator,
     EmailStr,
+    Field,
     HttpUrl,
     PostgresDsn,
     computed_field,
+    field_validator,
     model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -53,7 +55,17 @@ class Settings(BaseSettings):
     REALTIME_REDIS_URL: str | None = None
     SENTRY_DSN: HttpUrl | None = None
     POSTGRES_SERVER: str
-    POSTGRES_PORT: int = 5432
+    POSTGRES_PORT: int = Field(default=5432)
+
+    @field_validator("POSTGRES_SERVER", mode="before")
+    @classmethod
+    def _host_without_port(cls, v: Any) -> Any:
+        """Allow mistaken ``host:5432`` in POSTGRES_SERVER; port belongs in POSTGRES_PORT."""
+        if isinstance(v, str) and v.count(":") == 1:
+            host, port_str = v.rsplit(":", 1)
+            if port_str.isdigit():
+                return host
+        return v
     POSTGRES_USER: str
     POSTGRES_PASSWORD: str = ""
     POSTGRES_DB: str = ""
