@@ -146,6 +146,7 @@ class UserPublic(UserBase):
     joins_blocked_until: datetime | None = None
     notification_prefs: list[str] | None = None
     profile_image_url: str | None = None
+    is_suspended: bool = False
 
 
 class UsersPublic(SQLModel):

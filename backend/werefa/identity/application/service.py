@@ -116,7 +116,10 @@ def read_users(session: Session, skip: int, limit: int) -> UsersPublic:
     users = session.exec(
         select(User).order_by(col(User.created_at).desc()).offset(skip).limit(limit)
     ).all()
-    return UsersPublic(data=list(users), count=count)
+    return UsersPublic(
+        data=[to_user_public(u) for u in users],
+        count=count,
+    )
 
 
 def create_user(session: Session, user_in: UserCreate) -> User:
