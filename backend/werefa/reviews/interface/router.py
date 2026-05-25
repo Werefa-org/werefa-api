@@ -16,10 +16,22 @@ from werefa.api.deps import CurrentUser, SessionDep
 from werefa.reviews.application import service as reviews_service
 from werefa.shared.models import (
     ProviderRatingSummary,
+    Review,
     ReviewCreate,
     ReviewPublic,
     ReviewsPublic,
+    User,
 )
+
+
+def _review_to_public(session: SessionDep, review: Review) -> ReviewPublic:
+    reviewer_name: str | None = None
+    user = session.get(User, review.user_id)
+    if user is not None:
+        reviewer_name = user.full_name
+    return ReviewPublic.model_validate(
+        review, update={"reviewer_name": reviewer_name}
+    )
 
 ticket_router = APIRouter(prefix="/tickets", tags=["reviews"])
 provider_router = APIRouter(prefix="/providers", tags=["reviews"])
@@ -35,12 +47,13 @@ def create_review(
     ticket_id: uuid.UUID,
     body: ReviewCreate,
 ) -> Any:
-    return reviews_service.create_review(
+    review = reviews_service.create_review(
         session,
         ticket_id=ticket_id,
         actor_user_id=current_user.id,
         body=body,
     )
+    return _review_to_public(session, review)
 
 
 @provider_router.get(
@@ -57,7 +70,7 @@ def list_provider_reviews(
         session, provider_id=provider_id, limit=limit, offset=offset
     )
     return ReviewsPublic(
-        data=[ReviewPublic.model_validate(r) for r in rows], count=count
+        data=[_review_to_public(session, r) for r in rows], count=count
     )
 
 

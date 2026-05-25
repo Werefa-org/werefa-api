@@ -8,6 +8,7 @@ from werefa.core.config import settings
 from werefa.core.image_upload import read_image_upload
 from werefa.providers.domain import membership_rules
 from werefa.providers.infrastructure import repo as provider_repo
+from werefa.reviews.infrastructure import repo as reviews_repo
 from werefa.queue.application.ewt import (
     provider_ewt_minutes,
     round_minutes,
@@ -122,17 +123,21 @@ def profile_image_url_for_provider(p: Provider) -> str | None:
     )
 
 
-def provider_public_view(p: Provider) -> dict:
+def _rating_fields_from_reviews(session: Session, provider_id: uuid.UUID) -> dict:
+    count, rating_sum, _ = reviews_repo.aggregate_ratings_for_provider(
+        session=session, provider_id=provider_id
+    )
+    rating_avg = round(rating_sum / count, 2) if count > 0 else None
+    return {"ratings_count": count, "rating_avg": rating_avg}
+
+
+def provider_public_view(session: Session, p: Provider) -> dict:
     """Derived fields shared by every provider read path.
 
-    Routes use ``ProviderPublic.model_validate(p, update=provider_public_view(p))``
-    to expose the rating aggregate without leaking ``ratings_sum`` directly.
+    Ratings come from review rows so counts match the public reviews list.
     """
-    count = p.ratings_count or 0
-    rating_avg = round((p.ratings_sum or 0) / count, 2) if count > 0 else None
     return {
-        "ratings_count": count,
-        "rating_avg": rating_avg,
+        **_rating_fields_from_reviews(session, p.id),
         "profile_image_url": profile_image_url_for_provider(p),
     }
 
@@ -327,11 +332,6 @@ def discover_providers(
             load_factor = "medium"
         else:
             load_factor = "high"
-        rating_avg: float | None
-        if (p.ratings_count or 0) > 0:
-            rating_avg = round((p.ratings_sum or 0) / p.ratings_count, 2)
-        else:
-            rating_avg = None
         data.append(
             ProviderDiscoveryPublic.model_validate(
                 p,
@@ -341,8 +341,7 @@ def discover_providers(
                     "serving_tickets": serving_tickets,
                     "estimated_wait_minutes": estimated_wait_minutes,
                     "load_factor": load_factor,
-                    "ratings_count": p.ratings_count or 0,
-                    "rating_avg": rating_avg,
+                    **_rating_fields_from_reviews(session, p.id),
                     "profile_image_url": profile_image_url_for_provider(p),
                 },
             )
