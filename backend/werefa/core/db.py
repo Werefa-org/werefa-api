@@ -7,6 +7,7 @@ from werefa.shared.models import User, UserCreate
 engine = create_engine(
     str(settings.SQLALCHEMY_DATABASE_URI),
     pool_pre_ping=True,
+    connect_args={"connect_timeout": 10},
 )
 
 
