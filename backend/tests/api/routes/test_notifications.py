@@ -278,3 +278,88 @@ def test_list_notifications_returns_recent_first(
     notes = _list_notifications(client, customer)
     assert len(notes) == 1
     assert notes[0]["kind"] == NotificationKind.you_are_next.value
+
+
+def test_call_next_notifies_second_customer_get_ready(
+    client: TestClient,
+    db: Session,
+    superuser_token_headers: dict[str, str],
+) -> None:
+    """First call-next starts serving A; B at position 2 gets a get-ready alert."""
+    _, sid = _create_provider_and_service(
+        client=client, db=db, superuser_token_headers=superuser_token_headers
+    )
+    _, h_a = _customer(client, db)
+    _, h_b = _customer(client, db)
+
+    for hdrs in (h_a, h_b):
+        r = client.post(
+            f"{settings.API_V1_STR}/service-items/{sid}/join",
+            headers=hdrs,
+            json={},
+        )
+        assert r.status_code == 200
+
+    r = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/call-next",
+        headers=superuser_token_headers,
+    )
+    assert r.status_code == 200
+
+    b_notes = _list_notifications(client, h_b)
+    assert any(
+        n["kind"] == NotificationKind.head_to_counter.value
+        and "Get ready" in str(n.get("body", ""))
+        for n in b_notes
+    ), b_notes
+
+
+def test_staff_manual_notify_waiting_customer(
+    client: TestClient,
+    db: Session,
+    superuser_token_headers: dict[str, str],
+) -> None:
+    _, sid = _create_provider_and_service(
+        client=client, db=db, superuser_token_headers=superuser_token_headers
+    )
+    _, h_a = _customer(client, db)
+    _, h_b = _customer(client, db)
+
+    for hdrs in (h_a, h_b):
+        r = client.post(
+            f"{settings.API_V1_STR}/service-items/{sid}/join",
+            headers=hdrs,
+            json={},
+        )
+        assert r.status_code == 200
+
+    tickets = client.get(
+        f"{settings.API_V1_STR}/service-items/{sid}/tickets",
+        headers=superuser_token_headers,
+    )
+    assert tickets.status_code == 200
+    waiting = [
+        t
+        for t in tickets.json()["data"]
+        if t["status"] == "waiting" and t.get("user_id")
+    ]
+    assert len(waiting) >= 1
+    ticket_id = waiting[0]["id"]
+    target_user_id = waiting[0]["user_id"]
+
+    r = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/tickets/{ticket_id}/notify",
+        headers=superuser_token_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+
+    for hdrs in (h_a, h_b):
+        notes = _list_notifications(client, hdrs)
+        if any(
+            n["kind"] == NotificationKind.you_are_next.value
+            and "next in the queue" in str(n.get("body", "")).lower()
+            for n in notes
+        ):
+            return
+    pytest.fail(f"manual notify did not reach user {target_user_id}")

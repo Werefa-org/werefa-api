@@ -698,6 +698,11 @@ class TicketApprovalBody(SQLModel):
     )
 
 
+class NotifyTicketResult(SQLModel):
+    ok: bool = True
+    message: str = "Notification sent"
+
+
 class ClearQueueResult(SQLModel):
     cleared_count: int = 0
     notified_count: int = 0
