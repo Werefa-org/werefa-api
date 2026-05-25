@@ -15,6 +15,16 @@ class VerificationStatus(str, Enum):
     rejected = "rejected"
 
 
+class ProviderDocumentKind(str, Enum):
+    trade_license = "trade_license"
+    owner_id = "owner_id"
+    address_proof = "address_proof"
+    health_permit = "health_permit"
+    establishment_letter = "establishment_letter"
+    tin_certificate = "tin_certificate"
+    other = "other"
+
+
 class MembershipRole(str, Enum):
     owner = "owner"
     staff = "staff"
