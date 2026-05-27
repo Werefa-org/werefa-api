@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Populate the database with realistic Ethiopian demo data (Addis Ababa & Adama).
+"""Populate the database with realistic Ethiopian demo data (Addis Ababa hospitals
+and 15 Adama local businesses with bilingual Amharic/English copy).
 
 Safe to re-run: upserts users/providers by fixed email/slug. Use --reset to wipe
 demo rows first.
@@ -24,8 +25,10 @@ import logging
 import re
 import sys
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
+from sqlalchemy import func
 from sqlmodel import Session, col, delete, select
 
 from werefa.core import cloudinary_storage
@@ -41,6 +44,12 @@ from werefa.shared.enums import (
     UserType,
     VerificationStatus,
 )
+_scripts_dir = Path(__file__).resolve().parent
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
+
+import adama_local_data as adama_local  # noqa: E402
+
 from werefa.shared.models import (
     LineChatMessage,
     Notification,
@@ -208,37 +217,10 @@ BUSINESSES: list[tuple[str, str, str, str, float, float, str, int]] = [
         VerificationStatus.verified.value,
         12,
     ),
-    (
-        "adama-hospital-medical-college",
-        "Adama Hospital Medical College",
-        "Adama",
-        "Oromia",
-        8.5420,
-        39.2673,
-        VerificationStatus.verified.value,
-        13,
-    ),
-    (
-        "adama-referral-hospital",
-        "Adama Referral Hospital",
-        "Adama",
-        "Oromia",
-        8.5389,
-        39.2701,
-        VerificationStatus.verified.value,
-        14,
-    ),
-    (
-        "adama-family-clinic",
-        "Adama Family Health Clinic",
-        "Adama",
-        "Oromia",
-        8.5410,
-        39.2655,
-        VerificationStatus.rejected.value,
-        15,
-    ),
 ]
+
+# 15 Adama local businesses (bilingual descriptions, custom service lines)
+BUSINESSES.extend(adama_local.ADAMA_LOCAL_ROWS)
 
 BIZ_PROFILE: dict[str, dict[str, object]] = {
     "tikur-anbessa-hospital": {
@@ -386,41 +368,9 @@ BIZ_PROFILE: dict[str, dict[str, object]] = {
         "access_code": "PHRM12",
         "image_url": IMG_PHARMACY,
     },
-    "adama-hospital-medical-college": {
-        "category": "health",
-        "description": (
-            "Major teaching hospital in Adama (Nazret). Outpatient pavilion handles "
-            "hundreds of visits daily — use Werefa to hold your place before travel."
-        ),
-        "address": "Adama, Hospital Road",
-        "phone": "+251221110000",
-        "show_phone_public": True,
-        "access_code": "ADMC13",
-        "image_url": IMG_HOSPITAL,
-    },
-    "adama-referral-hospital": {
-        "category": "health",
-        "description": (
-            "Regional referral hospital for East Shewa zone. General outpatient, "
-            "maternal health intake, and lab sample drop-off queues."
-        ),
-        "address": "Adama city center, referral gate",
-        "phone": "+251221120000",
-        "show_phone_public": True,
-        "access_code": "ADRF14",
-        "image_url": IMG_HOSPITAL,
-    },
-    "adama-family-clinic": {
-        "category": "health",
-        "description": (
-            "Rejected demo application — illustrates verification rejection UX for "
-            "owners (incomplete license upload)."
-        ),
-        "address": "Adama, Kebele 05",
-        "access_code": "ADFC15",
-        "image_url": IMG_CLINIC,
-    },
 }
+
+BIZ_PROFILE.update(adama_local.build_adama_biz_profiles())
 
 SERVICE_LINES: dict[str, list[tuple[str, int, str, str]]] = {
     # name, minutes, price ETB, description
@@ -536,30 +486,27 @@ BIZ_SERVICE_KEY: dict[str, str] = {
     "gandhi-memorial-hospital": "hospital_outpatient",
     "bole-specialty-dental": "dental",
     "guardian-pharmacy-bole": "pharmacy",
-    "adama-hospital-medical-college": "hospital_outpatient",
-    "adama-referral-hospital": "hospital_outpatient",
-    "adama-family-clinic": "clinic",
 }
 
-# Flagship queue demo (Adama Hospital Medical College — busy outpatient line)
-FLAGSHIP_SLUG = "adama-hospital-medical-college"
+# Flagship queue demo — busy Adama Immigration passport line
+FLAGSHIP_SLUG = "adama-immigration-office"
 
 LINE_CHAT_SAMPLES: list[tuple[str, str]] = [
     (
-        "Welcome to Adama Hospital Medical College outpatient queue. "
-        "Your number will appear on the screen near Window A.",
+        "እንኳን ወደ አዳማ ኢሚግሬሽን ጽ/ቤት በደህና መጡ። ቁጥርዎ በመስኮት 1 ላይ ይታያል።\n\n"
+        "Welcome to Adama Immigration. Your ticket number will show on Screen 1.",
         "info",
     ),
     (
-        "Estimated wait today: 25–40 minutes. Please stay within the waiting hall.",
+        "ዛሬ የተገመተው انتظار 45–90 ደቂቃ ነው። እባክዎ በመጠበቂያ ክፍል ይቆዩ።",
         "info",
     ),
     (
-        "Lab patients: fasting blood work is collected until 10:30 AM only.",
+        "ፓስፖርት መሰብሰብ፡ Window 2 — have your receipt and national ID ready.",
         "info",
     ),
     (
-        "Window A is now serving tickets 12–15. Please listen for your number.",
+        "አሁን ቁጥር 18–22 በአገልግሎት ላይ ናቸው።",
         "info",
     ),
 ]
@@ -686,6 +633,8 @@ def _apply_provider_profile(
     code = meta.get("access_code")
     if code:
         p.access_code = str(code)[:6]
+    if "is_open" in meta:
+        p.is_open = bool(meta["is_open"])
 
 
 def _upsert_provider(
@@ -784,9 +733,14 @@ def _upsert_provider(
 def _upsert_services(
     session: Session, *, provider: Provider, slug_suffix: str
 ) -> list[ServiceItem]:
-    key = BIZ_SERVICE_KEY.get(slug_suffix, "clinic")
-    templates = SERVICE_LINES.get(key, SERVICE_LINES["clinic"])
-    line_meta = SERVICE_LINE_META.get(key, {})
+    profile = BIZ_PROFILE.get(slug_suffix, {})
+    if slug_suffix in adama_local.ADAMA_SERVICES:
+        templates = adama_local.ADAMA_SERVICES[slug_suffix]
+        line_meta: dict[str, object] = {"category": profile.get("category")}
+    else:
+        key = BIZ_SERVICE_KEY.get(slug_suffix, "clinic")
+        templates = SERVICE_LINES.get(key, SERVICE_LINES["clinic"])
+        line_meta = SERVICE_LINE_META.get(key, {})
     items: list[ServiceItem] = []
     for idx, (name, minutes, price, desc) in enumerate(templates):
         row = session.exec(
@@ -817,18 +771,18 @@ def _upsert_services(
             session.commit()
             session.refresh(row)
 
+        if line_meta.get("category"):
+            row.category = str(line_meta["category"])
         if idx == 0:
-            if line_meta.get("category"):
-                row.category = str(line_meta["category"])
             if line_meta.get("requirements"):
                 row.requirements = str(line_meta["requirements"])
             row.allow_vip = bool(line_meta.get("allow_vip", False))
             if line_meta.get("vip_code"):
                 row.vip_code = str(line_meta["vip_code"])
-            row.is_paused = False
-            row.is_private = False
-            session.add(row)
-            session.commit()
+        row.is_paused = False
+        row.is_private = False
+        session.add(row)
+        session.commit()
 
         items.append(row)
     return items
@@ -905,12 +859,175 @@ def _seed_line_chat(session: Session, *, owner: User, service: ServiceItem) -> N
     session.commit()
 
 
-def _seed_provider_ratings(session: Session, *, provider: Provider) -> None:
-    """Aggregate counters for discovery cards (reviews require completed tickets)."""
-    provider.ratings_count = 48
-    provider.ratings_sum = 223  # ~4.6 average
+def _ratings_for_target(n: int, target_avg: float) -> list[int]:
+    """Integer star ratings whose mean is close to target_avg."""
+    if n <= 0:
+        return []
+    total = int(round(target_avg * n))
+    ratings = [5] * n
+    excess = sum(ratings) - total
+    i = 0
+    while excess > 0 and i < n:
+        if ratings[i] > 1:
+            ratings[i] -= 1
+            excess -= 1
+        i = (i + 1) % n
+    deficit = total - sum(ratings)
+    i = 0
+    while deficit > 0 and i < n:
+        if ratings[i] < 5:
+            ratings[i] += 1
+            deficit -= 1
+        i = (i + 1) % n
+    return ratings
+
+
+_REVIEW_COMMENTS = [
+    "በጣም ፈጣን አገልግሎት። የቆይታ ጊዜ እንደተነገረው ነበር።",
+    "Very helpful staff. Wait time matched the estimate.",
+    "አገልጋዮች በጣም አደንዛዥ ነበሩ። ደህንነቱ የተጠበቀ ነው።",
+    "Smooth process from check-in to finish. Would recommend.",
+    "በጣም ትዕዛዝ የተሞላበት ቦታ ነው። መመሪያዎቹ ግልጽ ነበሩ።",
+    "Queue moved faster than I expected. Great experience overall.",
+    "አገልግሎቱ ጥሩ ነበር፣ ትንሽ ቆይታ ብቻ ነበር።",
+    "Professional and courteous. Estimate was spot on.",
+    "ለቤተሰብ አገልግሎት ተስማሚ። ሁሉም ነገር በግልጽ ተገለጸ።",
+    "Easy to follow instructions. Staff answered all my questions.",
+    "የቀን መጀመሪያ ስላመጣሁ ትንሽ ቆይታ ነበር፣ ነገር ግን ዋጋው ይገባ ነበር።",
+    "Clean office and organized line. Happy with the service.",
+]
+
+
+def _seed_provider_reviews(
+    session: Session,
+    *,
+    provider: Provider,
+    service: ServiceItem,
+    seekers: list[User],
+    rating: float = 4.6,
+    count: int = 10,
+) -> None:
+    """Completed tickets + Review rows so the public reviews page lists real feedback."""
+    if session.exec(
+        select(Review.id).where(Review.provider_id == provider.id)
+    ).first():
+        return
+
+    n = min(max(count, 0), 12)
+    if n == 0 or not seekers:
+        return
+
+    ratings = _ratings_for_target(n, rating)
+    accurate_count = 0
+    ticket_base = 9000
+
+    for i in range(n):
+        seeker = seekers[i % len(seekers)]
+        accurate = (i % 4) != 3
+        if accurate:
+            accurate_count += 1
+        ticket = QueueEntry(
+            service_item_id=service.id,
+            user_id=seeker.id,
+            ticket_number=ticket_base + i,
+            status=TicketStatus.completed.value,
+            source=TicketSource.remote_app.value,
+        )
+        session.add(ticket)
+        session.flush()
+        session.add(
+            Review(
+                ticket_id=ticket.id,
+                user_id=seeker.id,
+                provider_id=provider.id,
+                service_item_id=service.id,
+                rating=ratings[i],
+                was_estimate_accurate=accurate,
+                comment=_REVIEW_COMMENTS[i % len(_REVIEW_COMMENTS)],
+            )
+        )
+
+    provider.ratings_count = n
+    provider.ratings_sum = sum(ratings)
+    provider.estimate_accurate_count = accurate_count
     session.add(provider)
+    service.next_ticket_number = max(service.next_ticket_number, ticket_base + n)
+    session.add(service)
     session.commit()
+
+
+def _sync_provider_rating_aggregates(session: Session, provider: Provider) -> None:
+    """Align provider.ratings_* columns with actual review rows (fixes stale seed counters)."""
+    count = session.exec(
+        select(func.count())
+        .select_from(Review)
+        .where(Review.provider_id == provider.id)
+    ).one()
+    rating_sum = session.exec(
+        select(func.coalesce(func.sum(Review.rating), 0)).where(
+            Review.provider_id == provider.id
+        )
+    ).one()
+    accurate = session.exec(
+        select(func.count())
+        .select_from(Review)
+        .where(
+            Review.provider_id == provider.id,
+            Review.was_estimate_accurate == True,  # noqa: E712
+        )
+    ).one()
+    provider.ratings_count = int(count or 0)
+    provider.ratings_sum = int(rating_sum or 0)
+    provider.estimate_accurate_count = int(accurate or 0)
+    session.add(provider)
+
+
+def _sync_all_demo_provider_rating_aggregates(session: Session) -> None:
+    providers = session.exec(
+        select(Provider).where(col(Provider.slug).like(f"{DEMO_SLUG_PREFIX}%"))
+    ).all()
+    for provider in providers:
+        _sync_provider_rating_aggregates(session, provider)
+    session.commit()
+    logger.info("Synced rating aggregates for %d demo providers", len(providers))
+
+
+def _seed_adama_queue_depth(
+    session: Session,
+    *,
+    service: ServiceItem,
+    seekers: list[User],
+    queue_length: int,
+    is_open: bool,
+) -> None:
+    """Approximate queueLength from the Adama catalog with real ticket rows."""
+    if not is_open or queue_length <= 0:
+        return
+    serving = min(2, max(1, queue_length // 20))
+    waiting = min(max(queue_length - serving, 0), 10)
+    ticket_no = 1
+    for _ in range(serving):
+        _seed_queue_ticket(
+            session,
+            service=service,
+            seeker=None,
+            ticket_number=ticket_no,
+            status=TicketStatus.serving.value,
+            guest_name=f"አገልጋይ {ticket_no}",
+            source=TicketSource.kiosk_walk_in.value,
+        )
+        ticket_no += 1
+    for i in range(waiting):
+        seeker = seekers[i] if i < len(seekers) else None
+        _seed_queue_ticket(
+            session,
+            service=service,
+            seeker=seeker,
+            ticket_number=ticket_no,
+            status=TicketStatus.waiting.value,
+            guest_name=None if seeker else f"ተራ {ticket_no}",
+        )
+        ticket_no += 1
 
 
 def _seed_flagship_queue(
@@ -1099,10 +1216,27 @@ def seed(session: Session) -> None:
             continue
 
         primary = services[0]
+        adama_meta = adama_local.ADAMA_META.get(slug_suffix)
+        if adama_meta:
+            _seed_provider_reviews(
+                session,
+                provider=p,
+                service=primary,
+                seekers=seekers,
+                rating=float(adama_meta["rating"]),
+                count=10,
+            )
+            _seed_adama_queue_depth(
+                session,
+                service=primary,
+                seekers=seekers,
+                queue_length=int(adama_meta["queue_length"]),
+                is_open=bool(adama_meta["is_open"]),
+            )
+
         if slug_suffix == FLAGSHIP_SLUG:
             flagship_service = primary
             flagship_owner = owner
-            _seed_provider_ratings(session, provider=p)
 
     if flagship_service and flagship_owner:
         _seed_flagship_queue(
@@ -1136,9 +1270,16 @@ def seed(session: Session) -> None:
     logger.info("Providers: provider1@example.com … provider15@example.com")
     logger.info("Admin: %s / %s", settings.FIRST_SUPERUSER, settings.FIRST_SUPERUSER_PASSWORD)
     logger.info("Discover slugs: %s*", DEMO_SLUG_PREFIX)
-    logger.info("Flagship queue: %s%s (5 seekers waiting, busy line)", DEMO_SLUG_PREFIX, FLAGSHIP_SLUG)
+    logger.info(
+        "Flagship queue: %s%s (immigration — busy passport line)",
+        DEMO_SLUG_PREFIX,
+        FLAGSHIP_SLUG,
+    )
+    logger.info("Adama local businesses: %d (bilingual descriptions)", len(adama_local.ADAMA_LOCAL_ROWS))
     logger.info("Join radius: %s km on all demo providers", JOIN_RADIUS_M // 1000)
     logger.info("VIP on flagship: user1 has priority; code VIPLINE on outpatient service")
+
+    _sync_all_demo_provider_rating_aggregates(session)
 
 
 def main() -> None:
