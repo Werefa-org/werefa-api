@@ -137,7 +137,7 @@ def create_provider(
     p = provider_service.create_provider(
         session, effective, auto_verify=auto_verify
     )
-    return ProviderPublic.model_validate(p, update=provider_public_view(p))
+    return ProviderPublic.model_validate(p, update=provider_public_view(session, p))
 
 
 @router.get(
@@ -165,7 +165,7 @@ def read_provider_access_code(
     return ProviderStaffPublic.model_validate(
         p,
         update={
-            **provider_public_view(p),
+            **provider_public_view(session, p),
             "last_rejection_reason": p.last_rejection_reason,
         },
     )
@@ -176,7 +176,7 @@ def read_provider_by_slug(*, session: SessionDep, slug: str) -> Any:
     p = provider_service.get_provider_by_slug(session, slug)
     if not p:
         raise HTTPException(status_code=404, detail="Provider not found")
-    return ProviderPublic.model_validate(p, update=provider_public_view(p))
+    return ProviderPublic.model_validate(p, update=provider_public_view(session, p))
 
 
 @router.get("/{provider_id}", response_model=ProviderPublic)
@@ -184,7 +184,7 @@ def read_provider(*, session: SessionDep, provider_id: uuid.UUID) -> Any:
     p = provider_service.get_provider(session, provider_id)
     if not p:
         raise HTTPException(status_code=404, detail="Provider not found")
-    return ProviderPublic.model_validate(p, update=provider_public_view(p))
+    return ProviderPublic.model_validate(p, update=provider_public_view(session, p))
 
 
 @router.get("/{provider_id}/customers", response_model=ProviderCustomersPublic)
@@ -255,7 +255,7 @@ async def upload_provider_profile_image(
     p = await provider_service.upload_provider_profile_image(
         session, provider_id=provider_id, upload=file
     )
-    return ProviderPublic.model_validate(p, update=provider_public_view(p))
+    return ProviderPublic.model_validate(p, update=provider_public_view(session, p))
 
 
 @router.patch("/{provider_id}", response_model=ProviderPublic)
@@ -270,7 +270,7 @@ def update_provider(
         session=session, current_user=current_user, provider_id=provider_id
     )
     p = provider_service.update_provider(session, provider_id, body)
-    return ProviderPublic.model_validate(p, update=provider_public_view(p))
+    return ProviderPublic.model_validate(p, update=provider_public_view(session, p))
 
 
 @router.post("/{provider_id}/pause-queue", response_model=ProviderPublic)
@@ -287,7 +287,7 @@ def pause_provider_queue(
     p = provider_service.set_provider_queue_paused(
         session, provider_id, paused=True
     )
-    return ProviderPublic.model_validate(p, update=provider_public_view(p))
+    return ProviderPublic.model_validate(p, update=provider_public_view(session, p))
 
 
 @router.post("/{provider_id}/resume-queue", response_model=ProviderPublic)
@@ -304,7 +304,7 @@ def resume_provider_queue(
     p = provider_service.set_provider_queue_paused(
         session, provider_id, paused=False
     )
-    return ProviderPublic.model_validate(p, update=provider_public_view(p))
+    return ProviderPublic.model_validate(p, update=provider_public_view(session, p))
 
 
 @router.post("/{provider_id}/members", response_model=MembershipPublic)
@@ -425,7 +425,7 @@ def list_my_providers(
         MyProviderPublic.model_validate(
             p,
             update={
-                **provider_public_view(p),
+                **provider_public_view(session, p),
                 "membership_role": member_role,
                 "last_rejection_reason": p.last_rejection_reason,
             },
@@ -450,7 +450,7 @@ def admin_verify_provider(
     p = provider_service.admin_verify_provider(
         session, provider_id, actor=_admin
     )
-    return ProviderPublic.model_validate(p, update=provider_public_view(p))
+    return ProviderPublic.model_validate(p, update=provider_public_view(session, p))
 
 
 @admin_router.post("/{provider_id}/reject", response_model=ProviderPublic)
@@ -466,7 +466,7 @@ def admin_reject_provider(
     p = provider_service.admin_reject_provider(
         session, provider_id, actor=_admin, reason=body.reason
     )
-    return ProviderPublic.model_validate(p, update=provider_public_view(p))
+    return ProviderPublic.model_validate(p, update=provider_public_view(session, p))
 
 
 @admin_router.post(

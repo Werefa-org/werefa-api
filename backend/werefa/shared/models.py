@@ -823,6 +823,7 @@ class ReviewPublic(ReviewBase):
     provider_id: uuid.UUID
     service_item_id: uuid.UUID
     created_at: datetime | None = None
+    reviewer_name: str | None = None
 
 
 class ReviewsPublic(SQLModel):

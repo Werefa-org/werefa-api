@@ -130,10 +130,11 @@ def list_reviews_for_provider(
 def provider_rating_summary(
     session: Session, *, provider_id: uuid.UUID
 ) -> ProviderRatingSummary:
-    provider = session.get(Provider, provider_id)
-    if provider is None:
+    if session.get(Provider, provider_id) is None:
         raise HTTPException(status_code=404, detail="Provider not found")
-    count = provider.ratings_count or 0
+    count, rating_sum, accurate = reviews_repo.aggregate_ratings_for_provider(
+        session=session, provider_id=provider_id
+    )
     if count == 0:
         return ProviderRatingSummary(
             provider_id=provider_id,
@@ -141,8 +142,8 @@ def provider_rating_summary(
             rating_avg=None,
             estimate_accuracy_rate=None,
         )
-    avg = round((provider.ratings_sum or 0) / count, 2)
-    accuracy = round((provider.estimate_accurate_count or 0) / count, 4)
+    avg = round(rating_sum / count, 2)
+    accuracy = round(accurate / count, 4)
     return ProviderRatingSummary(
         provider_id=provider_id,
         ratings_count=count,
