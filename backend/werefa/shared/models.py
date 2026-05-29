@@ -1284,6 +1284,7 @@ class ProviderDocument(SQLModel, table=True):
         foreign_key="user.id",
         ondelete="CASCADE",
     )
+    document_kind: str = Field(default="other", max_length=32, index=True)
     filename: str = Field(max_length=255)
     content_type: str = Field(max_length=120)
     # Cloudinary ``public_id`` (legacy column name kept to avoid a migration).
@@ -1298,10 +1299,19 @@ class ProviderDocument(SQLModel, table=True):
 class ProviderDocumentPublic(SQLModel):
     id: uuid.UUID
     provider_id: uuid.UUID
+    document_kind: str
     filename: str
     content_type: str
     created_at: datetime | None = None
     url: str
+
+
+class ProviderVerificationRequirements(SQLModel):
+    required_kinds: list[str]
+    uploaded_kinds: list[str]
+    missing_kinds: list[str]
+    ready_for_review: bool
+    is_verified: bool = False
 
 
 # --- Admin ---
