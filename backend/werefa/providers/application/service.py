@@ -62,10 +62,16 @@ def create_provider(
 def admin_verify_provider(
     session: Session, provider_id: uuid.UUID, *, actor: User
 ) -> Provider:
+    from werefa.providers.application import documents_service, verification_notify
+
     p = session.get(Provider, provider_id)
     if p is None:
         raise HTTPException(status_code=404, detail="Provider not found")
+    documents_service.assert_ready_for_verification(
+        session, provider_id=provider_id
+    )
     p.verification_status = VerificationStatus.verified.value
+    p.last_rejection_reason = None
     session.add(p)
     from werefa.admin.application import service as admin_service
 
@@ -79,12 +85,15 @@ def admin_verify_provider(
     )
     session.commit()
     session.refresh(p)
+    verification_notify.notify_provider_verified(session, p)
     return p
 
 
 def admin_reject_provider(
     session: Session, provider_id: uuid.UUID, *, actor: User, reason: str
 ) -> Provider:
+    from werefa.providers.application import verification_notify
+
     p = session.get(Provider, provider_id)
     if p is None:
         raise HTTPException(status_code=404, detail="Provider not found")
@@ -103,6 +112,7 @@ def admin_reject_provider(
     )
     session.commit()
     session.refresh(p)
+    verification_notify.notify_provider_rejected(session, p, reason=reason)
     return p
 
 

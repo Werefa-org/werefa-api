@@ -122,6 +122,46 @@ def ticket_deep_link(ticket_id: str) -> str:
     return f"{base}/me/tickets/{ticket_id}"
 
 
+def generate_verification_verified_email(
+    *,
+    email_to: str,
+    biz_name: str,
+    dashboard_link: str,
+) -> EmailData:
+    subject = f"{settings.PROJECT_NAME} — {biz_name} is verified"
+    html_content = render_email_template(
+        template_name="verification_verified.html",
+        context={
+            "project_name": settings.PROJECT_NAME,
+            "biz_name": biz_name,
+            "dashboard_link": dashboard_link,
+            "email": email_to,
+        },
+    )
+    return EmailData(html_content=html_content, subject=subject)
+
+
+def generate_verification_rejected_email(
+    *,
+    email_to: str,
+    biz_name: str,
+    reason: str,
+    documents_link: str,
+) -> EmailData:
+    subject = f"{settings.PROJECT_NAME} — action needed for {biz_name}"
+    html_content = render_email_template(
+        template_name="verification_rejected.html",
+        context={
+            "project_name": settings.PROJECT_NAME,
+            "biz_name": biz_name,
+            "reason": reason,
+            "documents_link": documents_link,
+            "email": email_to,
+        },
+    )
+    return EmailData(html_content=html_content, subject=subject)
+
+
 def generate_new_account_email(
     email_to: str, username: str, password: str
 ) -> EmailData:

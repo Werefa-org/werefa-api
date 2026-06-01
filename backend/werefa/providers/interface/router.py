@@ -1,7 +1,7 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import RedirectResponse
 
 from werefa.api.deps import (
@@ -26,9 +26,9 @@ from werefa.shared.models import (
     ProviderDiscoveriesPublic,
     DiscoveryCitiesPublic,
     DiscoveryRegionsPublic,
-    ProviderDocument,
     ProviderDocumentPublic,
     ProviderPublic,
+    ProviderVerificationRequirements,
     ProviderRejectBody,
     ProviderStaffPublic,
     ProviderUpdate,
@@ -373,6 +373,64 @@ def list_provider_documents(
     return [documents_service.document_public(r) for r in rows]
 
 
+@router.get(
+    "/{provider_id}/verification-requirements",
+    response_model=ProviderVerificationRequirements,
+)
+def provider_verification_requirements(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+) -> Any:
+    if provider_service.get_provider(session, provider_id) is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    if not current_user.is_superuser:
+        ensure_provider_staff(
+            session=session,
+            current_user=current_user,
+            provider_id=provider_id,
+        )
+    return documents_service.verification_requirements(
+        session, provider_id=provider_id
+    )
+
+
+@router.post(
+    "/{provider_id}/documents",
+    response_model=ProviderDocumentPublic,
+)
+async def upload_provider_document(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    provider_id: uuid.UUID,
+    file: UploadFile = File(...),
+    document_kind: str = Form(...),
+) -> Any:
+    """Business owner/staff uploads KYC documents (not admins)."""
+    if current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admins review documents only. Business owners upload from the dashboard.",
+        )
+    if provider_service.get_provider(session, provider_id) is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=provider_id,
+    )
+    row = documents_service.store_provider_document(
+        session,
+        provider_id=provider_id,
+        uploader=current_user,
+        upload=file,
+        document_kind=document_kind,
+    )
+    return documents_service.document_public(row)
+
+
 @router.get("/{provider_id}/documents/{doc_id}/file")
 def download_provider_document(
     *,
@@ -467,25 +525,3 @@ def admin_reject_provider(
         session, provider_id, actor=_admin, reason=body.reason
     )
     return ProviderPublic.model_validate(p, update=provider_public_view(session, p))
-
-
-@admin_router.post(
-    "/{provider_id}/documents",
-    response_model=ProviderDocumentPublic,
-)
-async def admin_upload_provider_document(
-    *,
-    session: SessionDep,
-    _admin: SuperUser,
-    provider_id: uuid.UUID,
-    file: UploadFile = File(...),
-) -> Any:
-    if provider_service.get_provider(session, provider_id) is None:
-        raise HTTPException(status_code=404, detail="Provider not found")
-    row = documents_service.store_provider_document(
-        session,
-        provider_id=provider_id,
-        uploader=_admin,
-        upload=file,
-    )
-    return documents_service.document_public(row)
