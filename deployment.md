@@ -175,7 +175,9 @@ export BACKEND_CORS_ORIGINS="https://dashboard.${DOMAIN?Variable not set},https:
 
 You can set several other environment variables:
 
-* `PROJECT_NAME`: The name of the project, used in the API for the docs and emails.
+* `PROJECT_NAME`: API title (e.g. `Werefa API`) for OpenAPI docs.
+* `BRAND_NAME`: Customer-facing name in email subjects and bodies (default `Werefa`).
+* `EMAILS_FROM_NAME`: Sender display name (defaults to `BRAND_NAME`).
 * `STACK_NAME`: The name of the stack used for Docker Compose labels and project name, this should be different for `staging`, `production`, etc. You could use the same domain replacing dots with dashes, e.g. `fastapi-project-example-com` and `staging-fastapi-project-example-com`.
 * `BACKEND_CORS_ORIGINS`: A list of allowed CORS origins separated by commas.
 * `FIRST_SUPERUSER`: The email of the first superuser, this superuser will be the one that can create new users.

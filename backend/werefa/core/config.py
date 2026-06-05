@@ -50,7 +50,10 @@ class Settings(BaseSettings):
             self.FRONTEND_HOST
         ]
 
+    # OpenAPI / internal title (can differ from customer-facing email brand).
     PROJECT_NAME: str = "Werefa API"
+    # Shown in email subjects, bodies, and default From name.
+    BRAND_NAME: str = "Werefa"
     # Optional: enable cross-process real-time (queue WebSocket) fan-out. If unset, in-memory only.
     REALTIME_REDIS_URL: str | None = None
     SENTRY_DSN: HttpUrl | None = None
@@ -99,7 +102,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _set_default_emails_from(self) -> Self:
         if not self.EMAILS_FROM_NAME:
-            self.EMAILS_FROM_NAME = self.PROJECT_NAME
+            self.EMAILS_FROM_NAME = self.BRAND_NAME
         return self
 
     EMAIL_RESET_TOKEN_EXPIRE_HOURS: int = 48

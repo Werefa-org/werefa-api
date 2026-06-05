@@ -22,6 +22,11 @@ class EmailData:
     subject: str
 
 
+def _brand() -> str:
+    """Customer-facing name for subjects and templates (not the API doc title)."""
+    return settings.BRAND_NAME
+
+
 def render_email_template(*, template_name: str, context: dict[str, Any]) -> str:
     template_str = (
         Path(__file__).parent / "email-templates" / "build" / template_name
@@ -56,23 +61,23 @@ def send_email(
 
 
 def generate_test_email(email_to: str) -> EmailData:
-    project_name = settings.PROJECT_NAME
-    subject = f"{project_name} - Test email"
+    brand = _brand()
+    subject = f"{brand} — Test email"
     html_content = render_email_template(
         template_name="test_email.html",
-        context={"project_name": settings.PROJECT_NAME, "email": email_to},
+        context={"project_name": brand, "email": email_to},
     )
     return EmailData(html_content=html_content, subject=subject)
 
 
 def generate_reset_password_email(email_to: str, email: str, token: str) -> EmailData:
-    project_name = settings.PROJECT_NAME
-    subject = f"{project_name} - Password recovery for user {email}"
+    brand = _brand()
+    subject = f"{brand} — Reset your password"
     link = f"{settings.FRONTEND_HOST}/reset-password?token={token}"
     html_content = render_email_template(
         template_name="reset_password.html",
         context={
-            "project_name": settings.PROJECT_NAME,
+            "project_name": brand,
             "username": email,
             "email": email_to,
             "valid_hours": settings.EMAIL_RESET_TOKEN_EXPIRE_HOURS,
@@ -97,7 +102,7 @@ def generate_queue_notification_email(
             "body": body,
             "ticket_link": ticket_link,
             "position": position,
-            "project_name": settings.PROJECT_NAME,
+            "project_name": _brand(),
         },
     )
     return EmailData(html_content=html_content, subject=subject)
@@ -114,7 +119,7 @@ def queue_notification_subject(kind: str) -> str:
         "queue_cleared": "Queue closed",
     }
     label = labels.get(kind, "Queue update")
-    return f"{settings.PROJECT_NAME} — {label}"
+    return f"{_brand()} — {label}"
 
 
 def ticket_deep_link(ticket_id: str) -> str:
@@ -128,11 +133,11 @@ def generate_verification_verified_email(
     biz_name: str,
     dashboard_link: str,
 ) -> EmailData:
-    subject = f"{settings.PROJECT_NAME} — {biz_name} is verified"
+    subject = f"{_brand()} — {biz_name} is verified"
     html_content = render_email_template(
         template_name="verification_verified.html",
         context={
-            "project_name": settings.PROJECT_NAME,
+            "project_name": _brand(),
             "biz_name": biz_name,
             "dashboard_link": dashboard_link,
             "email": email_to,
@@ -148,11 +153,11 @@ def generate_verification_rejected_email(
     reason: str,
     documents_link: str,
 ) -> EmailData:
-    subject = f"{settings.PROJECT_NAME} — action needed for {biz_name}"
+    subject = f"{_brand()} — Action needed for {biz_name}"
     html_content = render_email_template(
         template_name="verification_rejected.html",
         context={
-            "project_name": settings.PROJECT_NAME,
+            "project_name": _brand(),
             "biz_name": biz_name,
             "reason": reason,
             "documents_link": documents_link,
@@ -165,12 +170,12 @@ def generate_verification_rejected_email(
 def generate_new_account_email(
     email_to: str, username: str, password: str
 ) -> EmailData:
-    project_name = settings.PROJECT_NAME
-    subject = f"{project_name} - New account for user {username}"
+    brand = _brand()
+    subject = f"{brand} — Your Werefa account is ready"
     html_content = render_email_template(
         template_name="new_account.html",
         context={
-            "project_name": settings.PROJECT_NAME,
+            "project_name": brand,
             "username": username,
             "password": password,
             "email": email_to,
