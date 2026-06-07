@@ -31,6 +31,7 @@ from werefa.shared.models import (
     PositionPingCreate,
     QueueEntriesPublic,
     QueueEntry,
+    NotifyTicketResult,
     QueueEntryPublic,
     QueueJoin,
     ServiceItem,
@@ -449,6 +450,35 @@ def set_ticket_priority(
     )
     notify_queue_subscribers(session, service_item_id, ticket=ticket, reason="priority_change")
     return QueueEntryPublic.model_validate(ticket)
+
+
+@router.post(
+    "/{service_item_id}/tickets/{ticket_id}/notify",
+    response_model=NotifyTicketResult,
+)
+def notify_waiting_customer(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    ticket_id: uuid.UUID,
+) -> Any:
+    """Send a you-are-next notification to a waiting app customer."""
+    svc = _service_or_404(session, service_item_id)
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=svc.provider_id,
+    )
+    ticket = session.get(QueueEntry, ticket_id)
+    if ticket is None or ticket.service_item_id != service_item_id:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    notifications_service.notify_ticket_staff_you_are_next(
+        session,
+        ticket=ticket,
+        service_item_id=service_item_id,
+    )
+    return NotifyTicketResult()
 
 
 @router.get("/{service_item_id}/tickets", response_model=QueueEntriesPublic)

@@ -17,6 +17,18 @@ def test_decide_alert_at_one_emits_you_are_next() -> None:
     assert decision.kind == NotificationKind.you_are_next
 
 
+def test_decide_alert_position_two_with_serving_emits_get_ready() -> None:
+    decision = decide_alert(
+        position=2,
+        last_alert_position=None,
+        top_k=3,
+        has_serving_ahead=True,
+    )
+    assert decision is not None
+    assert decision.kind == NotificationKind.head_to_counter
+    assert "Get ready" in decision.body
+
+
 def test_decide_alert_in_between_does_nothing() -> None:
     assert decide_alert(position=2, last_alert_position=None, top_k=3) is None
     assert decide_alert(position=4, last_alert_position=None, top_k=3) is None

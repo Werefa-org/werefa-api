@@ -203,6 +203,52 @@ def dispatch(
     return row
 
 
+STAFF_YOU_ARE_NEXT_BODY = "You are next in the queue!!!!"
+
+
+def notify_ticket_staff_you_are_next(
+    session: Session,
+    *,
+    ticket: QueueEntry,
+    service_item_id: uuid.UUID,
+) -> Notification | None:
+    """Staff-triggered alert: customer is next in line (app users only)."""
+    if ticket.user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Walk-in customers cannot receive app notifications.",
+        )
+    if ticket.status != TicketStatus.waiting.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only waiting customers can be notified.",
+        )
+    user = session.get(User, ticket.user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This customer cannot receive notifications.",
+        )
+    pos = _ticket_position(session, ticket)
+    result = dispatch(
+        session,
+        user=user,
+        payload=NotificationPayload(
+            kind=NotificationKind.you_are_next,
+            body=STAFF_YOU_ARE_NEXT_BODY,
+            ticket_id=ticket.id,
+            service_item_id=service_item_id,
+            position=pos,
+        ),
+    )
+    ticket.last_alert_position = 1
+    session.add(ticket)
+    session.commit()
+    if result is not None:
+        session.refresh(result)
+    return result
+
+
 def notify_ticket_now_serving(
     session: Session,
     *,
@@ -332,6 +378,10 @@ def evaluate_smart_alerts_for_service_line(
         .order_by(col(QueueEntry.ticket_number))
     ).all()
 
+    has_serving_ahead = any(
+        t.status == TicketStatus.serving.value for t in rows
+    )
+
     fired: list[Notification] = []
     for ticket in rows:
         if ticket.status == TicketStatus.serving.value:
@@ -343,6 +393,7 @@ def evaluate_smart_alerts_for_service_line(
             position=pos,
             last_alert_position=ticket.last_alert_position,
             top_k=settings.LIVENESS_TOP_K,
+            has_serving_ahead=has_serving_ahead,
         )
         if decision is None:
             continue
@@ -476,6 +527,8 @@ __all__ = [
     "evaluate_smart_alerts_for_service_line",
     "notify_line_chat_staff_message",
     "notify_ticket_now_serving",
+    "notify_ticket_staff_you_are_next",
+    "STAFF_YOU_ARE_NEXT_BODY",
     "run_evaluate_smart_alerts_for_service_line",
     "get_registry",
     "list_user_notifications",
