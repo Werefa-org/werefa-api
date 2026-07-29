@@ -18,8 +18,24 @@ def custom_generate_unique_id(route: APIRoute) -> str:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    # Imported here rather than at module scope so the notification stack
+    # (and its worker threads) is only touched by processes that actually
+    # serve requests — CLI entry points import ``werefa.main`` for the app
+    # object alone.
+    from werefa.notifications.application import service as notifications_service
+
     async with realtime_lifespan():
-        yield
+        # Started inside the realtime lifespan: a delivery that falls
+        # through to the websocket channel needs the coordinator up, and
+        # stopping first means no job is left mid-publish on the way down.
+        delivery = notifications_service.get_delivery_queue()
+        delivery.start()
+        try:
+            yield
+        finally:
+            delivery.stop(
+                timeout=settings.NOTIFICATION_DELIVERY_SHUTDOWN_SECONDS
+            )
 
 
 if settings.SENTRY_DSN and settings.ENVIRONMENT != "local":

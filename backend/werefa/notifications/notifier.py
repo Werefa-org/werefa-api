@@ -10,6 +10,14 @@ the network.
 Tests stub the registry by passing in a fake notifier per channel, which
 is why the registry is a plain dict mapping rather than a global module
 singleton.
+
+Channels whose delivery leaves this machine (SMS, email) are not sent on
+the request thread any more — the dispatcher hands them to the delivery
+worker, which needs two things a bare ``bool`` cannot express: whether a
+failure is worth retrying, and whether the channel is configured at all.
+Both live on *optional* companion members (:class:`RetryAwareNotifier`)
+rather than on ``Notifier`` itself, so every existing notifier — and
+every fake in the test suite — keeps working untouched.
 """
 
 from __future__ import annotations
@@ -18,10 +26,17 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from enum import Enum
+from typing import TYPE_CHECKING, Protocol
 
 from werefa.shared.enums import NotificationChannel, NotificationKind
 from werefa.shared.models import User, utcnow
+
+if TYPE_CHECKING:
+    # Import-time only: keeps this module loadable in pure-rule tests that
+    # never touch the SMS stack, matching how the realtime import is
+    # deferred inside ``WebSocketNotifier.send``.
+    from werefa.notifications.infrastructure.sms import SmsProvider
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +77,89 @@ class Notifier(Protocol):
     channel: NotificationChannel
 
     def send(self, *, user: User, payload: NotificationPayload) -> bool: ...
+
+
+class DeliveryOutcome(str, Enum):
+    """What the delivery worker should do next about one send.
+
+    Coarser than any gateway's error catalogue and finer than the ``bool``
+    the dispatcher wants, because "retry, or move to the next channel?"
+    is the only extra distinction the worker has to make.
+    """
+
+    delivered = "delivered"
+    transient = "transient"
+    """Worth trying again — timeout, 5xx, rate limit, SMTP hiccup."""
+
+    permanent = "permanent"
+    """Never going to work — bad number, no address, channel switched off."""
+
+
+class RetryAwareNotifier(Protocol):
+    """A :class:`Notifier` that also answers the retry question.
+
+    Implemented by the channels the delivery worker actually queues (SMS
+    and email). ``ready`` is what lets the dispatcher keep its fast path:
+    a channel that reports ``False`` is skipped inline exactly as it is
+    today, so a deployment with ``SMS_PROVIDER=disabled`` never writes a
+    ``queued`` ledger row it would only have to walk back a moment later.
+
+    Both members deliberately keep vendor knowledge inside the notifier —
+    the dispatcher must never learn what "configured" means for a
+    particular gateway.
+    """
+
+    channel: NotificationChannel
+
+    @property
+    def ready(self) -> bool: ...
+
+    def send(self, *, user: User, payload: NotificationPayload) -> bool: ...
+
+    def deliver(
+        self, *, user: User, payload: NotificationPayload
+    ) -> DeliveryOutcome: ...
+
+
+def channel_is_ready(notifier: Notifier) -> bool:
+    """Can this channel deliver at all right now?
+
+    Notifiers that don't advertise ``ready`` are the in-process ones
+    (websocket, push, logger); they are always worth trying because
+    trying costs nothing.
+    """
+    ready = getattr(notifier, "ready", None)
+    return True if ready is None else bool(ready)
+
+
+def deliver_via(
+    notifier: Notifier, *, user: User, payload: NotificationPayload
+) -> DeliveryOutcome:
+    """Ask a notifier for the tri-state outcome the worker needs.
+
+    A plain ``Notifier`` only answers yes/no, and ``False`` is mapped to
+    ``permanent``: without an explicit retryable signal we cannot tell a
+    timeout from a rejected number, and re-sending on spec risks
+    double-delivering. The same reasoning applies to a notifier that
+    raises — adapters are contracted not to, so an exception is a bug to
+    fix rather than a blip to ride out.
+    """
+    deliver = getattr(notifier, "deliver", None)
+    try:
+        if deliver is None:
+            sent = notifier.send(user=user, payload=payload)
+            return DeliveryOutcome.delivered if sent else DeliveryOutcome.permanent
+        outcome: DeliveryOutcome = deliver(user=user, payload=payload)
+    except Exception:  # noqa: BLE001 — a bad notifier must not kill the worker
+        logger.exception(
+            "notifier_failed",
+            extra={
+                "channel": getattr(notifier, "channel", None),
+                "user_id": str(user.id),
+            },
+        )
+        return DeliveryOutcome.permanent
+    return outcome
 
 
 class LoggerNotifier:
@@ -137,7 +235,18 @@ class EmailNotifier:
 
     channel = NotificationChannel.email
 
+    @property
+    def ready(self) -> bool:
+        from werefa.core.config import settings
+
+        return bool(settings.emails_enabled)
+
     def send(self, *, user: User, payload: NotificationPayload) -> bool:
+        return self.deliver(user=user, payload=payload) is DeliveryOutcome.delivered
+
+    def deliver(
+        self, *, user: User, payload: NotificationPayload
+    ) -> DeliveryOutcome:
         from werefa.core.config import settings
         from werefa.utils import (
             generate_queue_notification_email,
@@ -147,9 +256,9 @@ class EmailNotifier:
         )
 
         if not settings.emails_enabled:
-            return False
+            return DeliveryOutcome.permanent
         if not user.email:
-            return False
+            return DeliveryOutcome.permanent
         ticket_link = (
             ticket_deep_link(str(payload.ticket_id))
             if payload.ticket_id is not None
@@ -170,12 +279,15 @@ class EmailNotifier:
                 html_content=email_data.html_content,
             )
         except Exception:
+            # SMTP failures are overwhelmingly transient (greylisting,
+            # connection resets, a relay briefly over quota), so this is
+            # the one place worth another go.
             logger.exception(
                 "notification_email_send_failed",
                 extra={"user_id": str(user.id), "kind": payload.kind.value},
             )
-            return False
-        return True
+            return DeliveryOutcome.transient
+        return DeliveryOutcome.delivered
 
 
 class PushNotifier:
@@ -200,24 +312,155 @@ class PushNotifier:
 
 
 class SmsNotifier:
-    """SMS gateway — Twilio-class integration placeholder."""
+    """Real SMS delivery through the configured gateway (FR-07).
+
+    Everything vendor-specific lives behind ``SmsProvider``
+    (``notifications/infrastructure/sms``); this class only decides
+    *whether* a text can be sent and turns the gateway's richer outcome
+    back into the boolean the dispatcher wants.
+
+    Three things make it "cannot deliver" — no gateway configured, no
+    usable phone number, or a gateway that declined. All three log a
+    distinct reason, because "SMS never arrives" is otherwise
+    indistinguishable from "the user doesn't have SMS in their prefs".
+    """
 
     channel = NotificationChannel.sms
 
-    def send(self, *, user: User, payload: NotificationPayload) -> bool:
-        from werefa.core.config import settings
+    def __init__(self, provider: SmsProvider | None = None) -> None:
+        # Injected in tests; otherwise resolved per send from the cached
+        # module-level provider so ``set_sms_provider`` takes effect
+        # without rebuilding the notifier registry.
+        self._provider = provider
 
-        if not settings.SMS_DELIVERY_STUB_ENABLED:
+    def _resolve_provider(self) -> SmsProvider:
+        if self._provider is not None:
+            return self._provider
+        from werefa.notifications.infrastructure.sms import get_sms_provider
+
+        return get_sms_provider()
+
+    @property
+    def ready(self) -> bool:
+        """Whether a gateway is configured at all.
+
+        Asked by the dispatcher *before* it decides to defer SMS, so an
+        `SMS_PROVIDER=disabled` deployment keeps falling through to the
+        next channel inline instead of round-tripping through the worker
+        to learn the same thing.
+        """
+        return bool(self._resolve_provider().configured)
+
+    def send(self, *, user: User, payload: NotificationPayload) -> bool:
+        return self.deliver(user=user, payload=payload) is DeliveryOutcome.delivered
+
+    def deliver(
+        self, *, user: User, payload: NotificationPayload
+    ) -> DeliveryOutcome:
+        from werefa.core.config import settings
+        from werefa.notifications.infrastructure.sms import (
+            SmsMessage,
+            render_sms_body,
+            to_e164,
+        )
+        from werefa.utils import ticket_deep_link
+
+        provider = self._resolve_provider()
+        if not provider.configured:
             logger.info(
                 "notification_sms_skipped",
-                extra={"user_id": str(user.id)},
+                extra={
+                    "user_id": str(user.id),
+                    "reason": "provider_not_configured",
+                    "provider": provider.name,
+                },
             )
-            return False
-        logger.info(
-            "notification_sms_stub_delivered",
-            extra={"user_id": str(user.id), "kind": payload.kind.value},
+            # Nothing to retry: a gateway does not configure itself.
+            return DeliveryOutcome.permanent
+
+        to = to_e164(
+            getattr(user, "phone_number", None),
+            default_country_code=settings.SMS_DEFAULT_COUNTRY_CODE,
         )
-        return True
+        if to is None:
+            logger.info(
+                "notification_sms_skipped",
+                extra={
+                    "user_id": str(user.id),
+                    "reason": "no_usable_phone_number",
+                },
+            )
+            return DeliveryOutcome.permanent
+
+        ticket_link = (
+            ticket_deep_link(str(payload.ticket_id))
+            if settings.SMS_INCLUDE_TICKET_LINK and payload.ticket_id is not None
+            else None
+        )
+        message = SmsMessage(
+            to=to,
+            body=render_sms_body(
+                body=payload.body,
+                brand=settings.BRAND_NAME,
+                ticket_link=ticket_link,
+                max_chars=settings.SMS_MAX_BODY_CHARS,
+            ),
+            # Stable per ticket+kind, so a gateway that de-duplicates won't
+            # double-text someone when a queue mutation replays.
+            idempotency_key=(
+                f"{payload.ticket_id}:{payload.kind.value}"
+                if payload.ticket_id is not None
+                else None
+            ),
+        )
+
+        try:
+            result = provider.send(message)
+        except Exception:
+            # Adapters are contracted not to raise, but a third-party
+            # client can still surprise us and a text message must never
+            # take down a queue mutation.
+            logger.exception(
+                "notification_sms_provider_crashed",
+                extra={"user_id": str(user.id), "provider": provider.name},
+            )
+            # Treated as permanent rather than transient: the adapter
+            # broke its own contract, so we have no idea whether the text
+            # went out, and retrying could double-charge and double-text.
+            return DeliveryOutcome.permanent
+
+        if result.accepted:
+            logger.info(
+                "notification_sms_delivered",
+                extra={
+                    "user_id": str(user.id),
+                    "kind": payload.kind.value,
+                    "provider": result.provider,
+                    "provider_message_id": result.provider_message_id,
+                },
+            )
+            return DeliveryOutcome.delivered
+
+        logger.warning(
+            "notification_sms_failed",
+            extra={
+                "user_id": str(user.id),
+                "kind": payload.kind.value,
+                "provider": result.provider,
+                "outcome": result.outcome.value,
+                "retryable": result.retryable,
+                "error_code": result.error_code,
+                "error_detail": result.error_detail,
+            },
+        )
+        # ``retryable`` is the adapters' existing transient/permanent
+        # split (SmsOutcome.unavailable vs rejected) — until now it was
+        # only ever logged.
+        return (
+            DeliveryOutcome.transient
+            if result.retryable
+            else DeliveryOutcome.permanent
+        )
 
 
 def default_registry() -> dict[NotificationChannel, Notifier]:

@@ -191,6 +191,42 @@ You can set several other environment variables:
 * `POSTGRES_DB`: The database name to use for this application. You can leave the default of `app`.
 * `SENTRY_DSN`: The DSN for Sentry, if you are using it.
 
+### SMS notifications
+
+The `sms` notification channel dispatches through a pluggable gateway adapter, so
+switching vendors is a config change plus one adapter class — see
+`backend/werefa/notifications/infrastructure/sms/`.
+
+* `SMS_PROVIDER`: Which gateway to use. Built-ins are `disabled` (default),
+  `console` (logs the fully rendered message instead of sending — the right choice
+  for local dev and staging) and `twilio`. Any name registered via
+  `register_sms_provider()` also works; an unknown name fails at startup and lists
+  the registered ones.
+* `SMS_DEFAULT_COUNTRY_CODE`: Country assumed for national numbers, e.g. `+251`.
+  `User.phone_number` is free-form, so `0911234567` only becomes `+251911234567`
+  when this is set. Without it, users whose number isn't already stored in
+  international form are skipped rather than guessed at.
+* `SMS_MAX_BODY_CHARS`: Hard cap on the rendered message (default `320`, about two
+  GSM-7 segments).
+* `SMS_INCLUDE_TICKET_LINK`: Append the ticket deep link to the message (default
+  `true`).
+* `SMS_TIMEOUT_SECONDS`: Gateway HTTP timeout (default `5`). Kept short because
+  dispatch is synchronous — see the note in `sms/twilio.py`.
+
+Twilio-specific, required when `SMS_PROVIDER=twilio` (startup fails otherwise):
+
+* `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN`: API credentials.
+* `TWILIO_MESSAGING_SERVICE_SID`: Preferred sender in production — Twilio handles
+  sender pools, sticky sender and per-country compliance. Wins when both this and
+  `TWILIO_FROM_NUMBER` are set.
+* `TWILIO_FROM_NUMBER`: A purchased number in E.164, as an alternative sender.
+* `TWILIO_API_BASE_URL`: Override the API host (default `https://api.twilio.com`),
+  useful for pointing staging at a local fake.
+
+Note that SMS only goes out to users who have `sms` in their notification
+preferences; it is not in `NOTIFICATION_DEFAULT_PREFS`, so enabling a provider
+alone does not start texting anyone.
+
 ## GitHub Actions Environment Variables
 
 There are some environment variables only used by GitHub Actions that you can configure:

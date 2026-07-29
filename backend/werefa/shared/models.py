@@ -1014,13 +1014,21 @@ class NotificationBase(SQLModel):
 
 
 class Notification(NotificationBase, table=True):
-    """Append-only ledger of every alert dispatched (FR-07).
+    """Ledger of every alert dispatched (FR-07).
 
     One row per (user, ticket, position trigger) is emitted regardless of
     delivery success. ``status`` records what happened on the chosen
     channel; ``channel`` reflects the *first deliverable* preference at
     dispatch time (or ``logger`` if everything else failed, since
     ``LoggerNotifier`` always succeeds).
+
+    Rows are append-only *except* for ``read_at`` and for the one
+    transition the delivery worker owns: a remote channel (SMS, email) is
+    written ``queued`` by ``dispatch`` and later rewritten by
+    ``deliver_job`` with the channel that actually delivered and a final
+    ``delivered``/``failed`` status. A row still reading ``queued`` well
+    after ``created_at`` means the worker lost the job, most likely to a
+    restart.
     """
 
     __tablename__ = "notification"

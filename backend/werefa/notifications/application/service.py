@@ -1,21 +1,51 @@
-"""Notification dispatch + ledger + smart-alert orchestration (FR-07)."""
+"""Notification dispatch + ledger + smart-alert orchestration (FR-07).
+
+Dispatch is still synchronous for channels that deliver in-process
+(websocket, push, logger) — they cost microseconds and their result can
+honestly be written straight into the ledger. Channels that leave the
+machine (SMS, email) are handed to the delivery worker instead, because
+a gateway round-trip has no useful upper bound and used to be paid by
+the HTTP request.
+
+That split has one consequence worth stating plainly: for a deferred
+channel the ledger row is written ``queued`` and *resolved later* by
+:func:`deliver_job`, which also owns the fall-through to the next
+preference — only the worker can know whether SMS actually worked.
+
+Jobs are handed over on ``after_commit`` rather than at dispatch time.
+Two reasons: the worker reads the ledger row from its own session, so
+the row has to exist; and a transaction that rolls back must not have
+texted anyone about a ticket that no longer exists.
+"""
 
 from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
+from dataclasses import replace
 
 from fastapi import HTTPException, status
-from sqlalchemy import func
+from sqlalchemy import event, func
+from sqlalchemy.orm import Session as SASession
 from sqlmodel import Session, col, select
 
 from werefa.core.config import settings
 from werefa.core.db import engine
+from werefa.notifications.domain.retry import RetryPolicy
 from werefa.notifications.domain.triggers import decide_alert
+from werefa.notifications.infrastructure.delivery import (
+    DeliveryAttempt,
+    DeliveryJob,
+    DeliveryQueue,
+)
 from werefa.notifications.notifier import (
+    DeliveryOutcome,
     NotificationPayload,
     Notifier,
+    channel_is_ready,
     default_registry,
+    deliver_via,
 )
 from werefa.shared.enums import (
     NotificationChannel,
@@ -66,6 +96,63 @@ def set_registry(registry: dict[NotificationChannel, Notifier] | None) -> None:
     _registry = registry
 
 
+# Channels whose delivery involves a third party we cannot bound. These are
+# the ones lifted off the request path; everything else stays inline.
+REMOTE_CHANNELS: frozenset[NotificationChannel] = frozenset(
+    {NotificationChannel.sms, NotificationChannel.email}
+)
+
+# Same lazy-singleton-with-a-setter shape as the registry above, for the
+# same reason: importing this module must not start threads.
+_delivery_queue: DeliveryQueue | None = None
+
+
+def get_delivery_queue() -> DeliveryQueue:
+    global _delivery_queue
+    if _delivery_queue is None:
+        _delivery_queue = DeliveryQueue(
+            deliver_job,
+            policy=RetryPolicy.from_settings(),
+            max_size=settings.NOTIFICATION_DELIVERY_QUEUE_MAX,
+            workers=settings.NOTIFICATION_DELIVERY_WORKERS,
+            shed_max=settings.NOTIFICATION_DELIVERY_SHED_MAX,
+            shed_ttl_seconds=settings.NOTIFICATION_DELIVERY_SHED_TTL_SECONDS,
+        )
+    return _delivery_queue
+
+
+def set_delivery_queue(queue: DeliveryQueue | None) -> None:
+    """Test seam: swap in an inline or recording queue; ``None`` resets.
+
+    Stops the queue being replaced so a swapped-out worker pool does not
+    keep draining jobs behind the new one's back.
+    """
+    global _delivery_queue
+    if _delivery_queue is not None and _delivery_queue is not queue:
+        _delivery_queue.stop(timeout=1.0)
+    _delivery_queue = queue
+
+
+# The worker cannot use the request's Session — it is closed once the
+# response is sent (same trap ``run_evaluate_smart_alerts_for_service_line``
+# documents), so every job opens its own.
+_session_factory: Callable[[], Session] | None = None
+
+
+def set_delivery_session_factory(
+    factory: Callable[[], Session] | None,
+) -> None:
+    """Test seam: let a delivery job run against a stub session."""
+    global _session_factory
+    _session_factory = factory
+
+
+def _open_session() -> Session:
+    if _session_factory is not None:
+        return _session_factory()
+    return Session(engine)
+
+
 def _user_prefs(user: User) -> list[NotificationChannel]:
     raw = user.notification_prefs or list(settings.NOTIFICATION_DEFAULT_PREFS)
     out: list[NotificationChannel] = []
@@ -113,9 +200,275 @@ def _persist_ledger(
     return row
 
 
+# --- hand-off to the delivery worker ------------------------------------
+
+_PENDING_KEY = "werefa_pending_deliveries"
+
+
+def _hand_off(session: Session, job: DeliveryJob) -> None:
+    """Queue ``job`` once the caller's transaction commits.
+
+    Sessions in component tests are hand-rolled fakes with no SQLAlchemy
+    event machinery — and no transaction to wait on either — so those
+    hand over immediately.
+    """
+    info = getattr(session, "info", None)
+    if info is None:
+        _submit(job)
+        return
+    info.setdefault(_PENDING_KEY, []).append(job)
+
+
+@event.listens_for(SASession, "after_commit")
+def _submit_pending_deliveries(session: SASession) -> None:
+    for job in session.info.pop(_PENDING_KEY, ()):
+        _submit(job)
+
+
+@event.listens_for(SASession, "after_rollback")
+def _drop_pending_deliveries(session: SASession) -> None:
+    # The ticket the alert was about never happened.
+    session.info.pop(_PENDING_KEY, None)
+
+
+def _submit(job: DeliveryJob) -> None:
+    queue = get_delivery_queue()
+    if queue.submit(job):
+        return
+    logger.error(
+        "notification_delivery_queue_full",
+        extra={"channel": job.channel.value, "user_id": str(job.user_id)},
+    )
+    # Order matters. Settle the row on a local channel *first*, then park
+    # the real one — parking first would race a promoted job into
+    # upgrading the row, only for the fallback to overwrite it.
+    _shed_to_local_channel(job)
+    parked = queue.defer(
+        replace(
+            job,
+            # The fall-through already happened above; a promoted job that
+            # fails must not deliver on those channels a second time.
+            fallback_channels=(),
+            upgrade_only=True,
+        )
+    )
+    if not parked:
+        logger.error(
+            "notification_delivery_shed_dropped",
+            extra={"channel": job.channel.value, "user_id": str(job.user_id)},
+        )
+
+
+def _shed_to_local_channel(job: DeliveryJob) -> None:
+    """Queue full: deliver on the best *in-process* preference instead.
+
+    A full queue means a gateway is wedged and work is piling up, and
+    this runs on the request thread — so the one thing it must not do is
+    call another provider. Handing the job to :func:`deliver_job` here
+    would do exactly that whenever a remote channel sits in the
+    fall-through list (prefs like ``["sms", "email", ...]``), putting an
+    unbounded network wait straight back on the response and, on
+    ``join-with-files``, back on the event loop.
+
+    So remote fallbacks are *skipped*, never sent. The alert lands on an
+    in-process channel — in practice the ``logger`` backstop, which
+    ``_user_prefs`` always keeps — and the ledger records whatever
+    actually delivered, or ``failed`` if nothing did.
+
+    This is the *floor*, not the final answer: the caller parks the shed
+    remote send on the queue afterwards, so it still goes out once
+    capacity returns and upgrades the row if it lands.
+    """
+    registry = get_registry()
+    candidates: list[tuple[NotificationChannel, Notifier]] = []
+    for channel in job.fallback_channels:
+        if channel in REMOTE_CHANNELS:
+            continue
+        notifier = registry.get(channel)
+        if notifier is not None:
+            candidates.append((channel, notifier))
+
+    if not candidates and job.notification_id is None:
+        # An email copy owns no ledger row, so there is nothing to record
+        # and no reason to open a session.
+        return
+
+    with _open_session() as session:
+        user = session.get(User, job.user_id)
+        if user is None or not user.is_active:
+            _resolve_ledger_row(
+                session,
+                job.notification_id,
+                channel=job.channel,
+                status_value=NotificationStatus.failed,
+            )
+            return
+
+        for channel, notifier in candidates:
+            outcome = deliver_via(notifier, user=user, payload=job.payload)
+            if outcome is DeliveryOutcome.delivered:
+                _resolve_ledger_row(
+                    session,
+                    job.notification_id,
+                    channel=channel,
+                    status_value=NotificationStatus.delivered,
+                )
+                return
+
+        _resolve_ledger_row(
+            session,
+            job.notification_id,
+            # Names a channel that was really tried, or the shed one when
+            # there was no local preference to fall back to.
+            channel=candidates[-1][0] if candidates else job.channel,
+            status_value=NotificationStatus.failed,
+        )
+
+
+def _resolve_ledger_row(
+    session: Session,
+    notification_id: uuid.UUID | None,
+    *,
+    channel: NotificationChannel,
+    status_value: NotificationStatus,
+) -> None:
+    """Flip a ``queued`` row to its final channel and status.
+
+    ``notification_id`` is ``None`` for the email copy, which never owned
+    a row — see :func:`_try_email_copy`.
+    """
+    if notification_id is None:
+        return
+    row = session.get(Notification, notification_id)
+    if row is None:
+        # The ticket (and its cascade) went away while the send was in
+        # flight, or the job outlived its transaction.
+        logger.warning(
+            "notification_delivery_row_missing",
+            extra={"notification_id": str(notification_id)},
+        )
+        return
+    row.channel = channel.value
+    row.status = status_value.value
+    session.add(row)
+    session.commit()
+
+
+def _record_failure(
+    session: Session,
+    job: DeliveryJob,
+    *,
+    channel: NotificationChannel,
+) -> None:
+    """Mark the row failed, unless a fallback already settled it.
+
+    A shed job's row records a local channel that really delivered. The
+    parked remote retry is a bonus attempt: if it works the row is
+    upgraded to that channel, and if it does not, the earlier delivery
+    still stands.
+    """
+    if job.upgrade_only:
+        logger.warning(
+            "notification_delivery_shed_retry_failed",
+            extra={
+                "channel": channel.value,
+                "user_id": str(job.user_id),
+            },
+        )
+        return
+    _resolve_ledger_row(
+        session,
+        job.notification_id,
+        channel=channel,
+        status_value=NotificationStatus.failed,
+    )
+
+
+def deliver_job(job: DeliveryJob) -> DeliveryAttempt:
+    """Run one queued send. This is the delivery worker's whole payload.
+
+    Owns the part of channel fall-through that used to live in the
+    dispatcher's loop: on a permanent failure it walks
+    ``fallback_channels`` in order, and only records ``failed`` once the
+    list is exhausted. A transient failure returns without touching the
+    ledger, leaving the row ``queued`` for the retry.
+    """
+    registry = get_registry()
+    with _open_session() as session:
+        user = session.get(User, job.user_id)
+        if user is None or not user.is_active:
+            _record_failure(session, job, channel=job.channel)
+            return DeliveryAttempt(DeliveryOutcome.permanent)
+
+        channel = job.channel
+        remaining = list(job.fallback_channels)
+        # A channel with no registered notifier is skipped rather than
+        # counted as a failed attempt — same as the dispatch loop — so the
+        # row ends up naming a channel that was really tried.
+        last_tried = job.channel
+        while True:
+            notifier = registry.get(channel)
+            if notifier is not None:
+                last_tried = channel
+                outcome = deliver_via(notifier, user=user, payload=job.payload)
+
+                if outcome is DeliveryOutcome.delivered:
+                    _resolve_ledger_row(
+                        session,
+                        job.notification_id,
+                        channel=channel,
+                        status_value=NotificationStatus.delivered,
+                    )
+                    return DeliveryAttempt(DeliveryOutcome.delivered)
+
+                if outcome is DeliveryOutcome.transient and not job.last_attempt:
+                    # Resume on *this* channel, which may already be past
+                    # the one the job arrived on.
+                    return DeliveryAttempt(
+                        DeliveryOutcome.transient,
+                        retry_with=replace(
+                            job,
+                            channel=channel,
+                            fallback_channels=tuple(remaining),
+                        ),
+                    )
+
+                if outcome is DeliveryOutcome.transient:
+                    logger.warning(
+                        "notification_delivery_retries_exhausted",
+                        extra={
+                            "channel": channel.value,
+                            "attempt": job.attempt,
+                            "user_id": str(user.id),
+                        },
+                    )
+
+            if not remaining:
+                _record_failure(session, job, channel=last_tried)
+                return DeliveryAttempt(DeliveryOutcome.permanent)
+            channel = remaining.pop(0)
+
+
+def _defers(channel: NotificationChannel, notifier: Notifier) -> bool:
+    """Should ``channel`` be handed to the worker instead of sent now?
+
+    A channel that reports itself unready (no SMS gateway configured, no
+    SMTP host) is *not* deferred: sending it to the worker would write a
+    ``queued`` row only to walk it back a moment later, where today the
+    dispatcher just falls through. ``ready`` lives on the notifier so this
+    stays free of any vendor knowledge.
+    """
+    return (
+        settings.NOTIFICATION_DELIVERY_ASYNC
+        and channel in REMOTE_CHANNELS
+        and channel_is_ready(notifier)
+    )
+
+
 def _try_email_copy(
     registry: dict[NotificationChannel, Notifier],
     *,
+    session: Session,
     user: User,
     payload: NotificationPayload,
 ) -> None:
@@ -131,6 +484,18 @@ def _try_email_copy(
         return
     notifier = registry.get(NotificationChannel.email)
     if notifier is None:
+        return
+    if _defers(NotificationChannel.email, notifier):
+        # No ledger row of its own — the copy has never had one, so the
+        # worker has nothing to resolve and nothing to fall through to.
+        _hand_off(
+            session,
+            DeliveryJob(
+                user_id=user.id,
+                channel=NotificationChannel.email,
+                payload=payload,
+            ),
+        )
         return
     try:
         notifier.send(user=user, payload=payload)
@@ -149,6 +514,12 @@ def dispatch(
 ) -> Notification | None:
     """Try each preferred channel until one accepts; record the result.
 
+    In-process channels are still tried inline, so their outcome lands in
+    the ledger synchronously. The first *remote* channel reached instead
+    ends the loop: the row is written ``queued`` on that channel and the
+    worker resolves it, carrying the untried preferences as
+    ``fallback_channels`` so fall-through survives the hand-off.
+
     Returns the persisted ``Notification`` row (or ``None`` when the user
     has no usable channels — a degenerate case impossible in practice
     because ``logger`` is always retained).
@@ -161,14 +532,27 @@ def dispatch(
         and NotificationChannel.email in prefs
     )
 
+    def _still_to_try(after: int) -> tuple[NotificationChannel, ...]:
+        return tuple(
+            c
+            for c in prefs[after + 1 :]
+            if not (defer_email and c == NotificationChannel.email)
+        )
+
     delivered_via: NotificationChannel | None = None
+    queued_via: NotificationChannel | None = None
+    fallbacks: tuple[NotificationChannel, ...] = ()
     skipped: list[NotificationChannel] = []
-    for channel in prefs:
+    for index, channel in enumerate(prefs):
         if defer_email and channel == NotificationChannel.email:
             continue
         notifier = registry.get(channel)
         if notifier is None:
             continue
+        if _defers(channel, notifier):
+            queued_via = channel
+            fallbacks = _still_to_try(index)
+            break
         try:
             ok = notifier.send(user=user, payload=payload)
         except Exception:  # noqa: BLE001 — never let a notifier crash dispatch
@@ -179,14 +563,18 @@ def dispatch(
             break
         skipped.append(channel)
 
-    final_status = (
-        NotificationStatus.delivered
-        if delivered_via is not None
-        else NotificationStatus.failed
-    )
-    final_channel = delivered_via or (
-        skipped[-1] if skipped else NotificationChannel.logger
-    )
+    if queued_via is not None:
+        final_channel = queued_via
+        final_status = NotificationStatus.queued
+    else:
+        final_status = (
+            NotificationStatus.delivered
+            if delivered_via is not None
+            else NotificationStatus.failed
+        )
+        final_channel = delivered_via or (
+            skipped[-1] if skipped else NotificationChannel.logger
+        )
 
     row = _persist_ledger(
         session,
@@ -198,8 +586,19 @@ def dispatch(
         status_value=final_status,
         position=payload.position,
     )
+    if queued_via is not None:
+        _hand_off(
+            session,
+            DeliveryJob(
+                user_id=user.id,
+                channel=queued_via,
+                payload=payload,
+                notification_id=row.id,
+                fallback_channels=fallbacks,
+            ),
+        )
     if defer_email:
-        _try_email_copy(registry, user=user, payload=payload)
+        _try_email_copy(registry, session=session, user=user, payload=payload)
     return row
 
 
@@ -522,8 +921,13 @@ __all__ = [
     "NotificationChannel",
     "NotificationKind",
     "EMAIL_COPY_KINDS",
+    "REMOTE_CHANNELS",
     "count_unread_notifications",
+    "deliver_job",
     "dispatch",
+    "get_delivery_queue",
+    "set_delivery_queue",
+    "set_delivery_session_factory",
     "evaluate_smart_alerts_for_service_line",
     "notify_line_chat_staff_message",
     "notify_ticket_now_serving",

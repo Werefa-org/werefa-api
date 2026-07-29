@@ -155,6 +155,39 @@ class Settings(BaseSettings):
     LIVENESS_ENABLED: bool = True
     NOTIFICATION_DEFAULT_PREFS: list[str] = ["websocket", "email", "logger"]
 
+    # --- Off-request delivery (FR-07) ---
+    # Channels that leave this machine (sms, email) are handed to an
+    # in-process worker instead of being sent inside the request, so a slow
+    # gateway can no longer hold a response open — or, on the one ``async
+    # def`` route that triggers alerts, hold the event loop.
+    # Turning this off restores the old fully-synchronous dispatch, which is
+    # the rollback lever if the worker ever misbehaves in production.
+    NOTIFICATION_DELIVERY_ASYNC: bool = True
+    NOTIFICATION_DELIVERY_WORKERS: int = Field(default=2, ge=1)
+    # Refusing work beats queueing without bound: a gateway outage would
+    # otherwise turn every queue mutation into retained memory. On overflow
+    # dispatch falls through to the next *local* channel (in practice the
+    # ``logger`` backstop) so the alert is still recorded, and the remote
+    # send is parked below rather than abandoned.
+    NOTIFICATION_DELIVERY_QUEUE_MAX: int = Field(default=1000, ge=1)
+    # Overflow parking. Shed remote sends wait here for the queue to drain,
+    # so a burst costs latency instead of costing the channel the user
+    # actually chose. Set to 0 to drop shed sends outright.
+    NOTIFICATION_DELIVERY_SHED_MAX: int = Field(default=500, ge=0)
+    # ...but not forever. A "you're next" text that lands minutes late is
+    # worse than none, because the customer has usually been served by
+    # then, so a parked send is discarded once it goes stale.
+    NOTIFICATION_DELIVERY_SHED_TTL_SECONDS: float = Field(default=120.0, gt=0)
+    # One initial send plus three retries at ~1s, ~2s, ~4s. Sized against how
+    # long a queue alert stays useful, not against how long a gateway might
+    # be down — "you're next" is worthless ten minutes late.
+    NOTIFICATION_DELIVERY_MAX_ATTEMPTS: int = Field(default=4, ge=1)
+    NOTIFICATION_DELIVERY_RETRY_BASE_SECONDS: float = Field(default=1.0, gt=0)
+    NOTIFICATION_DELIVERY_RETRY_MAX_SECONDS: float = Field(default=60.0, gt=0)
+    NOTIFICATION_DELIVERY_RETRY_JITTER: float = Field(default=0.2, ge=0, lt=1)
+    # How long shutdown waits for in-flight sends before dropping the rest.
+    NOTIFICATION_DELIVERY_SHUTDOWN_SECONDS: float = Field(default=5.0, gt=0)
+
     MAX_FAILED_LOGIN_ATTEMPTS: int = 5
     LOGIN_LOCKOUT_MINUTES: int = 15
 
@@ -203,9 +236,86 @@ class Settings(BaseSettings):
             and self.CLOUDINARY_API_SECRET
         )
 
-    # Optional — when set, push/sms notifiers report "delivered" for wiring tests.
+    # Optional — when set, the push notifier reports "delivered" for wiring tests.
     PUSH_DELIVERY_STUB_ENABLED: bool = False
+
+    # --- SMS (FR-07) ---
+    # Which gateway backs the ``sms`` notification channel. Built-ins are
+    # "disabled", "console" (log-only, for local dev) and "twilio"; the name is
+    # resolved against the registry in
+    # ``notifications/infrastructure/sms/factory.py``, so a deployment can point
+    # this at any adapter registered via ``register_sms_provider`` without a
+    # code change here.
+    SMS_PROVIDER: str = "disabled"
+    # Country to assume for national numbers (``0911…`` → ``+251911…``). With
+    # this unset, only numbers already stored in international form can be
+    # texted — the rest are skipped rather than guessed at.
+    SMS_DEFAULT_COUNTRY_CODE: str | None = None
+    # 320 chars ≈ two GSM-7 segments. Bodies are truncated, not split further.
+    # Constrained because a 0 or negative cap would silently send the whole
+    # body — i.e. a typo'd env var turns into unbounded multi-segment bills
+    # rather than a startup failure.
+    SMS_MAX_BODY_CHARS: int = Field(default=320, ge=40)
+    # Include the ticket deep link in the message text.
+    SMS_INCLUDE_TICKET_LINK: bool = True
+    # Per-send ceiling on the gateway round-trip. Sends now happen on the
+    # delivery worker rather than in the request (see
+    # ``NOTIFICATION_DELIVERY_ASYNC``), so this no longer bounds response
+    # latency — it bounds how long one worker thread is tied up before the
+    # attempt is called transient and retried.
+    SMS_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0)
+
+    TWILIO_ACCOUNT_SID: str | None = None
+    TWILIO_AUTH_TOKEN: str | None = None
+    # Sender: either a purchased number or (preferred in production) a
+    # Messaging Service, which handles sender pools and per-country
+    # compliance. The Messaging Service wins when both are set.
+    TWILIO_FROM_NUMBER: str | None = None
+    TWILIO_MESSAGING_SERVICE_SID: str | None = None
+    # Overridable so tests and staging can point at a local fake.
+    TWILIO_API_BASE_URL: str = "https://api.twilio.com"
+
+    # Deprecated: superseded by ``SMS_PROVIDER=console``. Still honoured so
+    # existing .env files keep working — see ``_apply_legacy_sms_stub_flag``.
     SMS_DELIVERY_STUB_ENABLED: bool = False
+
+    @model_validator(mode="after")
+    def _apply_legacy_sms_stub_flag(self) -> Self:
+        if self.SMS_DELIVERY_STUB_ENABLED and self.SMS_PROVIDER == "disabled":
+            warnings.warn(
+                "SMS_DELIVERY_STUB_ENABLED is deprecated; "
+                "set SMS_PROVIDER=console instead.",
+                DeprecationWarning,
+                stacklevel=1,
+            )
+            object.__setattr__(self, "SMS_PROVIDER", "console")
+        return self
+
+    @model_validator(mode="after")
+    def _check_twilio_credentials(self) -> Self:
+        """Fail at startup rather than at the first queue alert.
+
+        A half-filled Twilio block otherwise surfaces as notifications
+        quietly falling through to the logger channel, which is
+        indistinguishable from "nobody has SMS in their prefs".
+        """
+        if self.SMS_PROVIDER != "twilio":
+            return self
+        missing = [
+            name
+            for name, value in (
+                ("TWILIO_ACCOUNT_SID", self.TWILIO_ACCOUNT_SID),
+                ("TWILIO_AUTH_TOKEN", self.TWILIO_AUTH_TOKEN),
+            )
+            if not value
+        ]
+        if not (self.TWILIO_FROM_NUMBER or self.TWILIO_MESSAGING_SERVICE_SID):
+            missing.append("TWILIO_FROM_NUMBER or TWILIO_MESSAGING_SERVICE_SID")
+        if missing:
+            raise ValueError(
+                "SMS_PROVIDER=twilio requires: " + ", ".join(missing)
+            )
+        return self
 
     def _check_default_secret(self, var_name: str, value: str | None) -> None:
         if value == "changethis":

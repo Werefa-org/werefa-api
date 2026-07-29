@@ -117,6 +117,13 @@ class NotificationStatus(str, Enum):
     delivered = "delivered"
     failed = "failed"
     skipped = "skipped"
+    queued = "queued"
+    """Handed to the delivery worker; the outcome is not known yet.
+
+    Only ever set for channels that leave the machine (SMS, email). A row
+    that is still ``queued`` long after ``created_at`` means the worker
+    lost the job — a process restart is the expected cause.
+    """
 
 
 class DemandEventType(str, Enum):
