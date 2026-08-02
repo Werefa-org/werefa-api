@@ -19,6 +19,9 @@ from werefa.notifications.interface.router import (
 from werefa.notifications.interface.router import (
     router as notifications_router,
 )
+from werefa.notifications.interface.webhooks import (
+    router as notifications_webhooks_router,
+)
 from werefa.providers.interface import router as providers_router
 from werefa.providers.interface.router import admin_router as providers_admin_router
 from werefa.providers.interface.router import me_router as providers_me_router
@@ -59,6 +62,7 @@ api_router.include_router(strikes_admin_router)
 api_router.include_router(broadcasts_router_module)
 api_router.include_router(notifications_router)
 api_router.include_router(notifications_prefs_router)
+api_router.include_router(notifications_webhooks_router)
 api_router.include_router(realtime_router)
 
 

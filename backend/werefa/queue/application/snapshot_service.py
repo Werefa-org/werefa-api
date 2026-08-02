@@ -10,6 +10,7 @@ from sqlmodel import Session
 from werefa.core.config import settings
 from werefa.providers.application.service import profile_image_url_for_provider
 from werefa.providers.infrastructure import repo as provider_repo
+from werefa.queue.application import line_order
 from werefa.queue.application.ewt import service_line_ewt_minutes
 from werefa.queue.application.service import list_queue_entries
 from werefa.shared.enums import TicketStatus
@@ -48,6 +49,16 @@ def build_ticket_queue_snapshot(
     if not staff and ticket.user_id != user.id:
         raise HTTPException(status_code=403, detail="Not your ticket")
 
+    if ticket.user_id == user.id and ticket.status == TicketStatus.waiting.value:
+        # FR-05: record that their app is awake. Passive alone never clears a
+        # grace window — only a deliberate check-in does — but staff still
+        # want to see recent background traffic on the board.
+        from werefa.queue.application import liveness_service
+
+        liveness_service.touch_activity(session, ticket)
+        session.commit()
+        session.refresh(ticket)
+
     provider = session.get(Provider, svc.provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail="Provider not found")
@@ -84,10 +95,12 @@ def build_ticket_queue_snapshot(
             if line_ewt is not None:
                 estimated = max(0, int(round(line_ewt)))
     elif ticket.status == TicketStatus.waiting.value:
-        ordered = sorted(
-            waiting,
-            key=lambda r: (-(r.priority or 0), r.ticket_number),
-        )
+        # Match Call Next: priority first, then arrival time (shared with
+        # the liveness window and the FR-07 alerts via ``line_order``).
+        # Ticket numbers are display labels and must not decide "how far
+        # am I". Anyone being served is counted separately, in the
+        # estimate below, rather than as a person ahead in the queue.
+        ordered = sorted(waiting, key=line_order.call_order_key)
         for idx, row in enumerate(ordered, start=1):
             if row.id == ticket.id:
                 your_position = idx
@@ -115,10 +128,7 @@ def build_ticket_queue_snapshot(
 
     ahead_preview: list[QueueAheadPreview] = []
     if ticket.status == TicketStatus.waiting.value:
-        ordered = sorted(
-            waiting,
-            key=lambda r: (-(r.priority or 0), r.ticket_number),
-        )
+        ordered = sorted(waiting, key=line_order.call_order_key)
         for idx, row in enumerate(ordered[:3], start=1):
             ahead_preview.append(
                 QueueAheadPreview(

@@ -14,8 +14,10 @@ distinction the rest of the system needs:
 
 ``sent``
     The gateway accepted the message. Note this is *acceptance*, not
-    handset delivery — carriers report that asynchronously, which is a
-    webhook (see ``docs/missing.md``) not a return value.
+    handset delivery — carriers report that asynchronously. An adapter
+    that has asked for those reports says so with ``receipt_expected``,
+    and the ledger then holds the row at ``NotificationStatus.sent``
+    until :mod:`werefa.notifications.domain.receipts` hears back.
 ``rejected``
     Permanent. Bad number, blocked recipient, unusable credentials.
     Retrying the same message will fail the same way.
@@ -54,6 +56,18 @@ class SmsMessage:
     doesn't force a signature change.
     """
 
+    receipt_reference: str | None = None
+    """Opaque token the gateway should quote back on a delivery receipt.
+
+    In practice the ledger row id. How it travels is the adapter's
+    business — Twilio carries it in the ``StatusCallback`` URL it echoes
+    verbatim, an aggregator with DLR callbacks would use its client-ref
+    field — so the port stays free of any one vendor's callback shape.
+
+    ``None`` means "this send owns no row": ask for nothing, since a
+    receipt would have nothing to update.
+    """
+
 
 @dataclass(frozen=True)
 class SmsResult:
@@ -62,6 +76,15 @@ class SmsResult:
     provider_message_id: str | None = None
     error_code: str | None = None
     error_detail: str | None = None
+
+    receipt_expected: bool = False
+    """The gateway has been asked for a delivery receipt and owes us one.
+
+    Only meaningful alongside ``sent``. Defaults to ``False`` so an
+    adapter that has no receipt support — and every existing test double
+    — keeps producing the old "accepted means done" reading rather than
+    stranding ledger rows waiting for a callback that never comes.
+    """
 
     @property
     def accepted(self) -> bool:
@@ -73,12 +96,17 @@ class SmsResult:
 
     @classmethod
     def sent(
-        cls, *, provider: str, provider_message_id: str | None = None
+        cls,
+        *,
+        provider: str,
+        provider_message_id: str | None = None,
+        receipt_expected: bool = False,
     ) -> SmsResult:
         return cls(
             outcome=SmsOutcome.sent,
             provider=provider,
             provider_message_id=provider_message_id,
+            receipt_expected=receipt_expected,
         )
 
     @classmethod

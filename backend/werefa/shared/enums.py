@@ -61,12 +61,44 @@ class TicketSource(str, Enum):
 
 
 class LivenessState(str, Enum):
-    """Queue-entry liveness for remote top-K presence (FR-05)."""
+    """Queue-entry liveness for remote top-K presence (FR-05).
+
+    ``ok`` means "the customer deliberately confirmed, recently" — it does
+    *not* claim we know where they are. A check-in from a device with no
+    location fix sets ``ok`` too; whether a fix came with it is recorded
+    in ``last_ping_at``. Tying ``ok`` to GPS alone was the single biggest
+    source of false flags.
+
+    Only a check-in reaches ``ok``. Background polling from the app is
+    recorded in ``last_seen_at`` and leaves the state where it is, so a
+    silent absentee still reaches ``flagged``.
+    """
 
     idle = "idle"
     awaiting = "awaiting"
     ok = "ok"
     flagged = "flagged"
+
+
+class LivenessAction(str, Enum):
+    """What staff should *do* about a top-K ticket right now (FR-05).
+
+    The state tells you what we observed; the action tells you what to do
+    about it. Keeping them separate is deliberate — ``flagged`` on its own
+    never says whether to wait, call, or hold, which is why it was easy to
+    read as "this person is a no-show" when it usually is not.
+    """
+
+    # Nothing to decide: not a remote ticket, not waiting, or outside top-K.
+    none = "none"
+    # No concerns — call them in the normal order.
+    proceed = "proceed"
+    # They confirmed, but we have no recent location fix. Call them; a
+    # failed GPS read is not evidence of absence.
+    verify = "verify"
+    # They never confirmed through the grace windows — hold their spot and
+    # serve the next customer instead of burning the slot.
+    hold = "hold"
 
 
 class BroadcastSeverity(str, Enum):
@@ -92,6 +124,9 @@ class NotificationKind(str, Enum):
     now_serving = "now_serving"
     # Top-K liveness deadline passed without a fresh location ping.
     liveness_stale = "liveness_stale"
+    # Staff parked the ticket after repeated silence: the spot is kept, the
+    # line moves on. Deliberately worded as a reprieve, not a penalty.
+    liveness_hold = "liveness_hold"
     # Provider/staff posted in line chat.
     line_chat_update = "line_chat_update"
     # Staff cleared the line for the day; ticket closed, joins paused.
@@ -124,6 +159,55 @@ class NotificationStatus(str, Enum):
     that is still ``queued`` long after ``created_at`` means the worker
     lost the job — a process restart is the expected cause.
     """
+
+    sent = "sent"
+    """The gateway accepted the message; the handset has not confirmed it.
+
+    Only ever set for a channel that issues *delivery receipts* and was
+    asked for one — in practice SMS with a status callback configured.
+    ``delivered`` used to be written the moment Twilio returned a 201,
+    which is an acceptance, not an arrival: a wrong number, a barred
+    handset or a carrier that silently drops the message all look
+    identical to a real delivery from that side of the call.
+
+    The row moves on when the receipt lands — ``delivered`` or ``failed``
+    — see ``werefa.notifications.domain.receipts``. A row left at ``sent``
+    means no receipt ever came, which is an honest "we do not know"
+    rather than the false ``delivered`` it replaced. Nothing sweeps those:
+    unlike ``queued`` there is no job to resume, and re-sending a message
+    the gateway accepted risks texting somebody twice.
+    """
+
+
+class NotificationReach(str, Enum):
+    """Did an alert actually get in front of the customer?
+
+    Read off a ledger row rather than assumed, because the two questions
+    the ledger answers are not the same one: ``status`` says what the
+    delivery machinery managed, ``channel`` says who (if anyone) it
+    managed it *to*. A row reading ``delivered`` on the ``logger`` channel
+    is a complete success by the dispatcher's standards and told the
+    customer nothing at all — ``logger`` is the always-succeeds backstop
+    ``_user_prefs`` appends so every dispatch leaves a trace.
+
+    This exists because FR-05 liveness draws conclusions from silence. A
+    customer who never received the "tap to confirm" prompt has not
+    ignored us, and flagging them for it turns our delivery failure into
+    their problem — see :mod:`werefa.queue.domain.liveness_rules`.
+    """
+
+    confirmed = "confirmed"
+    """It reached them: a channel that talks to the customer reported a
+    delivery, and (for SMS) the carrier receipt agreed."""
+
+    unconfirmed = "unconfirmed"
+    """We cannot tell. Still queued, or accepted by a gateway that never
+    sent a receipt. Treated as the old behaviour — the benefit of the
+    doubt is only extended against *proof*, never against ignorance."""
+
+    not_reached = "not_reached"
+    """Provably nobody was told: every customer-facing channel failed, or
+    the only thing that "delivered" was the logger backstop."""
 
 
 class DemandEventType(str, Enum):

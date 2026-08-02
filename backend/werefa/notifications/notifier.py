@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol
@@ -52,17 +52,35 @@ class NotificationPayload:
     position: int | None = None
     occurred_at: datetime | None = None
 
+    notification_id: uuid.UUID | None = None
+    """Ledger row this send belongs to, stamped on by the delivery worker.
+
+    Carried so a gateway that issues delivery receipts can be told which
+    row to credit when the carrier reports back — Twilio echoes the
+    ``StatusCallback`` URL verbatim, so the id travels in it and comes
+    home in the webhook. ``None`` everywhere the send owns no row (the
+    email copy of a queue-critical alert), and ``None`` on the request
+    thread too: ``dispatch`` writes the row *after* it decides the
+    channel, so only :func:`deliver_job` can fill this in.
+
+    Correlating this way rather than by storing the gateway's message id
+    first is deliberate: the receipt for a fast carrier can beat our own
+    commit of the id, and a webhook that cannot find its row is a
+    delivery we silently fail to record.
+    """
+
     def with_default_time(self) -> NotificationPayload:
         if self.occurred_at is not None:
             return self
-        return NotificationPayload(
-            kind=self.kind,
-            body=self.body,
-            ticket_id=self.ticket_id,
-            service_item_id=self.service_item_id,
-            position=self.position,
-            occurred_at=utcnow(),
-        )
+        return replace(self, occurred_at=utcnow())
+
+    def for_ledger_row(
+        self, notification_id: uuid.UUID | None
+    ) -> NotificationPayload:
+        """Tie this payload to the row whose fate the send decides."""
+        if notification_id is None or notification_id == self.notification_id:
+            return self
+        return replace(self, notification_id=notification_id)
 
 
 class Notifier(Protocol):
@@ -93,6 +111,33 @@ class DeliveryOutcome(str, Enum):
 
     permanent = "permanent"
     """Never going to work — bad number, no address, channel switched off."""
+
+    accepted = "accepted"
+    """The gateway took it and owes us a delivery receipt.
+
+    Distinct from ``delivered`` in exactly one respect, and it is the
+    respect that matters: nobody has confirmed the message reached a
+    handset. The worker treats it like ``delivered`` for control flow —
+    the send left successfully, so there is nothing to retry and no
+    fall-through — and records it as ``NotificationStatus.sent`` instead,
+    which the receipt webhook later resolves.
+
+    Only a notifier that has genuinely asked for a receipt may return
+    this. Answering ``accepted`` for a gateway that never calls back
+    would leave the row stuck at ``sent`` forever, which is a worse lie
+    than the optimistic ``delivered`` it replaced.
+    """
+
+
+SENT_OUTCOMES: frozenset[DeliveryOutcome] = frozenset(
+    {DeliveryOutcome.delivered, DeliveryOutcome.accepted}
+)
+"""Outcomes that mean "the message left, stop looking for another channel".
+
+The pair exists so callers ask "did this go out?" once, instead of every
+site that used to compare against ``delivered`` growing a second arm and
+one of them being forgotten.
+"""
 
 
 class RetryAwareNotifier(Protocol):
@@ -190,26 +235,65 @@ class WebSocketNotifier:
     yet (process startup) or no event loop is available, we report
     "could not deliver" so the dispatcher falls through to the next
     channel.
+
+    Unlike the queue fan-out, this notifier's answer is load-bearing. The
+    dispatcher treats ``True`` as *delivered*: it stops walking the
+    preference list and writes ``delivered`` to the ledger, so SMS and
+    email are never attempted. Reporting success for a publish that has
+    merely been scheduled therefore costs the customer every channel at
+    once — the alert is recorded as sent and nothing arrives anywhere.
+
+    That is exactly what the old ``loop.create_task`` here did. It is not
+    thread-safe, and every sync ``def`` route reaching dispatch runs on a
+    worker thread: the task was appended to the loop's ready queue without
+    waking the loop, ``send`` returned ``True``, and the "you're next"
+    alert was booked as delivered while the loop slept. The ``except
+    RuntimeError`` below it never helped, because from a foreign thread
+    ``create_task`` does not raise — it succeeds and does nothing.
+
+    :func:`publish_and_confirm` waits, bounded, for the publish to actually
+    complete — but completing is still not the same as arriving, which is
+    the second half of the same bug and took longer to see. A publish to a
+    service line **nobody is subscribed to** completes perfectly and
+    reaches nobody, so "the fan-out happened" was still being read as "the
+    customer was told". With the default preferences
+    (``websocket, email, logger``) that is every customer whose app is
+    closed: the alert was booked ``delivered``, SMS was never tried, and
+    FR-05 liveness then flagged them for not answering it.
+
+    So the audience decides the answer, and there are three:
+
+    * **Subscribers took it** — delivered, in the strongest sense this
+      channel can offer.
+    * **Provably nobody** (zero subscribers, no Redis) — *not* delivered.
+      The dispatcher falls through to a channel that can still reach them.
+      This is the only honest reading, and it is the one that gets the
+      customer an SMS.
+    * **Cannot know** (behind Redis, subscribers may be on another
+      replica) — :attr:`DeliveryOutcome.accepted`. The event left, nobody
+      can vouch for who received it, and the ledger says so by holding the
+      row at ``sent``. Falling through here instead would double-notify
+      every app user in a multi-replica deployment; claiming delivery
+      would be the same lie in the other direction. ``sent`` ages into
+      ``not_reached`` if it is never bettered, so liveness still stops
+      blaming a customer we cannot show we reached.
     """
 
     channel = NotificationChannel.websocket
 
     def send(self, *, user: User, payload: NotificationPayload) -> bool:
+        return self.deliver(user=user, payload=payload) in SENT_OUTCOMES
+
+    def deliver(
+        self, *, user: User, payload: NotificationPayload
+    ) -> DeliveryOutcome:
         # Imported lazily so this module stays importable without the
         # realtime package being initialised (e.g. in pure-rule tests).
-        from werefa.realtime import lifespan
         from werefa.realtime.domain.events import NotifyEventV1
+        from werefa.realtime.notify import publish_and_confirm
 
-        coordinator = lifespan.coordinator
-        loop = lifespan.main_event_loop
-        if (
-            coordinator is None
-            or loop is None
-            or not loop.is_running()
-            or payload.ticket_id is None
-            or payload.service_item_id is None
-        ):
-            return False
+        if payload.ticket_id is None or payload.service_item_id is None:
+            return DeliveryOutcome.permanent
 
         event = NotifyEventV1(
             ticket_id=payload.ticket_id,
@@ -219,15 +303,29 @@ class WebSocketNotifier:
             body=payload.body,
             occurred_at=payload.occurred_at or utcnow(),
         )
-        text = event.model_dump_json()
-        try:
-            loop.create_task(coordinator.publish(payload.service_item_id, text))
-        except RuntimeError:
-            # ``create_task`` raises if the loop is not running on this
-            # thread; treat as a non-delivery so the dispatcher can try
-            # the next channel.
-            return False
-        return True
+        outcome = publish_and_confirm(
+            payload.service_item_id,
+            event.model_dump_json(),
+            what="Ticket alert",
+        )
+        if not outcome.published:
+            return DeliveryOutcome.permanent
+        if outcome.reached_nobody:
+            logger.info(
+                "notification_websocket_no_subscribers",
+                extra={
+                    "user_id": str(user.id),
+                    "kind": payload.kind.value,
+                    "service_item_id": str(payload.service_item_id),
+                },
+            )
+            # Permanent rather than transient: their app is not connected,
+            # and retrying this same channel on a timer would not change
+            # that. Falling through now is what reaches them.
+            return DeliveryOutcome.permanent
+        if outcome.audience_unknown:
+            return DeliveryOutcome.accepted
+        return DeliveryOutcome.delivered
 
 
 class EmailNotifier:
@@ -287,7 +385,11 @@ class EmailNotifier:
                 extra={"user_id": str(user.id), "kind": payload.kind.value},
             )
             return DeliveryOutcome.transient
-        return DeliveryOutcome.delivered
+        # The relay took it; whether it reached an inbox is a bounce that
+        # arrives as its own mail hours later, keyed to nothing we hold.
+        # Same class of claim as Twilio's 201 and a subscriber-less
+        # publish, so it gets the same answer rather than a third one.
+        return DeliveryOutcome.accepted
 
 
 class PushNotifier:
@@ -323,6 +425,12 @@ class SmsNotifier:
     usable phone number, or a gateway that declined. All three log a
     distinct reason, because "SMS never arrives" is otherwise
     indistinguishable from "the user doesn't have SMS in their prefs".
+
+    A fourth answer sits between success and failure and is the reason
+    :class:`DeliveryOutcome` grew ``accepted``: a gateway asked for a
+    delivery receipt has told us it *took* the message, nothing more.
+    Reporting that as delivery is how a text to a disconnected number
+    came to look identical to one the customer acted on.
     """
 
     channel = NotificationChannel.sms
@@ -352,7 +460,11 @@ class SmsNotifier:
         return bool(self._resolve_provider().configured)
 
     def send(self, *, user: User, payload: NotificationPayload) -> bool:
-        return self.deliver(user=user, payload=payload) is DeliveryOutcome.delivered
+        # ``accepted`` counts: the text is with the carrier. The bool
+        # contract only asks whether this channel took the message, and a
+        # receipt we have not received yet is not a reason to also send an
+        # email — see ``SENT_OUTCOMES``.
+        return self.deliver(user=user, payload=payload) in SENT_OUTCOMES
 
     def deliver(
         self, *, user: User, payload: NotificationPayload
@@ -412,6 +524,15 @@ class SmsNotifier:
                 if payload.ticket_id is not None
                 else None
             ),
+            # What the gateway should quote back on a delivery receipt.
+            # ``None`` when this send owns no ledger row, in which case
+            # there is nothing a receipt could update and the adapter
+            # asks for none.
+            receipt_reference=(
+                str(payload.notification_id)
+                if payload.notification_id is not None
+                else None
+            ),
         )
 
         try:
@@ -437,9 +558,19 @@ class SmsNotifier:
                     "kind": payload.kind.value,
                     "provider": result.provider,
                     "provider_message_id": result.provider_message_id,
+                    "receipt_expected": result.receipt_expected,
                 },
             )
-            return DeliveryOutcome.delivered
+            # A gateway that owes us a receipt has told us only that it
+            # took the message. Saying ``delivered`` here is what made
+            # "Twilio returned 201" and "it reached a phone" the same
+            # thing in the ledger, and the liveness flow then read our own
+            # optimism back as evidence the customer had been warned.
+            return (
+                DeliveryOutcome.accepted
+                if result.receipt_expected
+                else DeliveryOutcome.delivered
+            )
 
         logger.warning(
             "notification_sms_failed",

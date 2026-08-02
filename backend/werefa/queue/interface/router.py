@@ -27,6 +27,10 @@ from werefa.shared.models import (
     LineChatCreate,
     LineChatMessagePublic,
     LineChatMessagesPublic,
+    LivenessBoardPublic,
+    LivenessBoardRow,
+    LivenessHoldCreate,
+    LivenessHoldResult,
     LivenessPublic,
     PositionPingCreate,
     QueueEntriesPublic,
@@ -34,6 +38,7 @@ from werefa.shared.models import (
     NotifyTicketResult,
     QueueEntryPublic,
     QueueJoin,
+    ReopenQueueResult,
     ServiceItem,
     TicketPriorityUpdate,
     TicketQueueSnapshot,
@@ -261,8 +266,14 @@ def submit_position_ping(
     background_tasks: BackgroundTasks,
     service_item_id: uuid.UUID,
     ticket_id: uuid.UUID,
-    body: PositionPingCreate,
+    body: PositionPingCreate | None = None,
 ) -> Any:
+    """Customer check-in — "I'm on my way".
+
+    Coordinates are optional and an empty body is valid: a device with no
+    location fix must still be able to keep its spot, otherwise a denied
+    permission reads to staff exactly like walking away.
+    """
     _service_or_404(session, service_item_id)
     ticket = session.get(QueueEntry, ticket_id)
     if ticket is None or ticket.service_item_id != service_item_id:
@@ -272,6 +283,8 @@ def submit_position_ping(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the ticket holder can submit position pings",
         )
+    body = body or PositionPingCreate()
+    was_held = ticket.liveness_hold_until is not None
     row = liveness_service.record_position_ping(
         session,
         ticket_id=ticket_id,
@@ -282,7 +295,17 @@ def submit_position_ping(
         accuracy_m=body.accuracy_m,
     )
     notify_queue_subscribers(
-        session, service_item_id, ticket=row, reason="liveness_ping"
+        session,
+        service_item_id,
+        ticket=row,
+        # ``liveness_restored`` is reserved for a check-in that actually
+        # unparked the spot, which is the transition boards need to redraw:
+        # the ticket is callable again. A check-in with no hold in play is
+        # just ``liveness_ping``. The reason must track what changed in the
+        # row — announcing "restored" while Call Next still skipped the
+        # ticket is what had boards showing customers back in line who then
+        # never got called.
+        reason="liveness_restored" if was_held else "liveness_ping",
     )
     background_tasks.add_task(
         notifications_service.run_evaluate_smart_alerts_for_service_line,
@@ -378,8 +401,14 @@ def read_ticket_liveness(
             current_user=current_user,
             provider_id=svc.provider_id,
         )
-    t, last = liveness_service.read_liveness(
-        session, ticket_id=ticket_id, service_item_id=service_item_id
+    t, last, rec = liveness_service.read_liveness(
+        session,
+        ticket_id=ticket_id,
+        service_item_id=service_item_id,
+        # The owner opening their own ticket is proof the app is alive, so
+        # this read counts as contact.
+        seen_by_owner=ticket.user_id is not None
+        and ticket.user_id == current_user.id,
     )
     return LivenessPublic(
         ticket_id=t.id,
@@ -389,6 +418,112 @@ def read_ticket_liveness(
         last_latitude=last.latitude if last else None,
         last_longitude=last.longitude if last else None,
         last_accuracy_m=last.accuracy_m if last else None,
+        last_seen_at=t.liveness_last_seen_at,
+        misses=t.liveness_misses,
+        hold_until=t.liveness_hold_until,
+        hold_count=t.liveness_hold_count,
+        recommended_action=rec.action.value,
+        recommended_reason=rec.reason,
+        can_hold=rec.can_hold,
+    )
+
+
+@router.get(
+    "/{service_item_id}/liveness/board",
+    response_model=LivenessBoardPublic,
+)
+def read_liveness_board(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+) -> Any:
+    """Staff view: everyone about to be called, and what to do about them."""
+    svc = _service_or_404(session, service_item_id)
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=svc.provider_id,
+    )
+    rows = [
+        LivenessBoardRow.model_validate(r)
+        for r in liveness_service.build_liveness_board(session, service_item_id)
+    ]
+    return LivenessBoardPublic(data=rows, count=len(rows))
+
+
+@router.post(
+    "/{service_item_id}/tickets/{ticket_id}/liveness/hold",
+    response_model=LivenessHoldResult,
+)
+def hold_ticket_spot(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    ticket_id: uuid.UUID,
+    body: LivenessHoldCreate | None = None,
+) -> Any:
+    """Park a spot so the line moves on without dropping the customer.
+
+    The ticket stays ``waiting`` and no strike is recorded — the only path
+    to a strike is still calling the customer and marking a no-show.
+    """
+    svc = _service_or_404(session, service_item_id)
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=svc.provider_id,
+    )
+    body = body or LivenessHoldCreate()
+    ticket = liveness_service.hold_ticket(
+        session,
+        ticket_id=ticket_id,
+        service_item_id=service_item_id,
+        hold_seconds=body.hold_seconds,
+    )
+    notify_queue_subscribers(
+        session, service_item_id, ticket=ticket, reason="liveness_hold"
+    )
+    return LivenessHoldResult(
+        ticket_id=ticket.id,
+        status=ticket.status,
+        hold_until=ticket.liveness_hold_until,
+        hold_count=ticket.liveness_hold_count,
+        message="Spot held — the next customer will be called.",
+    )
+
+
+@router.post(
+    "/{service_item_id}/tickets/{ticket_id}/liveness/release",
+    response_model=LivenessHoldResult,
+)
+def release_ticket_hold(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+    ticket_id: uuid.UUID,
+) -> Any:
+    """Customer turned up: unpark the spot immediately."""
+    svc = _service_or_404(session, service_item_id)
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=svc.provider_id,
+    )
+    ticket = liveness_service.release_hold(
+        session, ticket_id=ticket_id, service_item_id=service_item_id
+    )
+    notify_queue_subscribers(
+        session, service_item_id, ticket=ticket, reason="liveness_restored"
+    )
+    return LivenessHoldResult(
+        ticket_id=ticket.id,
+        status=ticket.status,
+        hold_until=ticket.liveness_hold_until,
+        hold_count=ticket.liveness_hold_count,
+        message="Hold released — the ticket is callable again.",
     )
 
 
@@ -449,6 +584,13 @@ def set_ticket_priority(
         priority=body.priority,
     )
     notify_queue_subscribers(session, service_item_id, ticket=ticket, reason="priority_change")
+    # A priority change *is* a change to who gets called next, so it owes
+    # the line the same alert pass every other queue mutation runs. Without
+    # it the customer a VIP bump just moved to the front was never told —
+    # the counter called someone who had no idea they were next.
+    notifications_service.evaluate_smart_alerts_for_service_line(
+        session, service_item_id=service_item_id
+    )
     return QueueEntryPublic.model_validate(ticket)
 
 
@@ -514,6 +656,25 @@ def clear_queue(
         provider_id=svc.provider_id,
     )
     return clear_queue_service.clear_service_line_queue(
+        session, service_item_id=service_item_id
+    )
+
+
+@router.post("/{service_item_id}/reopen-queue", response_model=ReopenQueueResult)
+def reopen_queue(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    service_item_id: uuid.UUID,
+) -> Any:
+    """Undo the end-of-day pause from ``clear-queue``; cleared tickets stay closed."""
+    svc = _service_or_404(session, service_item_id)
+    ensure_provider_staff(
+        session=session,
+        current_user=current_user,
+        provider_id=svc.provider_id,
+    )
+    return clear_queue_service.reopen_service_line_queue(
         session, service_item_id=service_item_id
     )
 

@@ -9,6 +9,10 @@ from werefa.realtime.infrastructure.hub import InMemoryQueueHub
 
 logger = logging.getLogger(__name__)
 
+#: Pause before rebuilding a failed subscription, so a hard Redis outage
+#: costs one attempt per second rather than a spin loop.
+_RESUBSCRIBE_BACKOFF_SECONDS = 1.0
+
 
 def _channel(sid: uuid.UUID) -> str:
     return f"werefa:queue:{sid}"
@@ -40,6 +44,26 @@ class RedisPubSubBackend:
         )
         logger.info("Real-time Redis pub/sub started for werefa:queue:*")
 
+    async def _resubscribe(self) -> None:
+        """Rebuild the pubsub channel after a connection error.
+
+        Without this, one dropped Redis connection permanently blinded the
+        worker: ``get_message`` raised, the loop caught it and spun straight
+        back into ``get_message`` on a pubsub whose subscription was gone,
+        so every subsequent queue event for every line served by that worker
+        vanished until the process restarted.
+        """
+        if self._client is None:
+            return
+        try:
+            if self._pub is not None:
+                await self._pub.close()
+        except Exception:
+            logger.debug("discarding failed pubsub", exc_info=True)
+        self._pub = self._client.pubsub(ignore_subscribe_messages=True)
+        await self._pub.psubscribe("werefa:queue:*")
+        logger.info("Real-time Redis pub/sub resubscribed to werefa:queue:*")
+
     async def _listen_loop(self) -> None:
         assert self._pub is not None
         while not self._stop.is_set():
@@ -70,13 +94,31 @@ class RedisPubSubBackend:
                 break
             except Exception:
                 logger.exception("redis queue sub loop")
+                if self._stop.is_set():
+                    break
+                # Back off before retrying, otherwise a persistent failure
+                # (Redis down, auth rejected) becomes a hot spin that starves
+                # the loop the WebSocket sends run on.
+                await asyncio.sleep(_RESUBSCRIBE_BACKOFF_SECONDS)
+                try:
+                    await self._resubscribe()
+                except Exception:
+                    logger.exception("redis queue resubscribe failed")
 
     async def publish_to_channel(
         self, service_item_id: uuid.UUID, message: str
     ) -> None:
         if self._client is None:
             return
-        await self._client.publish(_channel(service_item_id), message)
+        try:
+            await self._client.publish(_channel(service_item_id), message)
+        except Exception:
+            # A Redis blip must not cost this worker's own subscribers their
+            # event. Cross-worker delivery is genuinely lost, but everyone
+            # attached here still gets it — the common single-worker case
+            # degrades to exactly the no-Redis behaviour.
+            logger.exception("redis publish failed; delivering locally only")
+            await self._hub.local_publish(service_item_id, message)
 
     async def shutdown(self) -> None:
         self._stop.set()

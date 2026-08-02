@@ -339,3 +339,142 @@ def test_users_without_sms_in_prefs_are_never_texted(
     )
 
     assert _real_registry.sent == []
+
+
+# --- acceptance is not arrival ---------------------------------------------
+
+
+def test_a_gateway_that_owes_a_receipt_leaves_the_row_unsettled(
+    _real_registry: _FakeProvider, inline_delivery: Any
+) -> None:
+    """The whole point of the receipt work, at the ledger level.
+
+    Twilio returning a 201 means it queued the message; the carrier's
+    verdict arrives later on the status callback. Recording that as
+    ``delivered`` made a text to a disconnected number and one somebody
+    acted on the same row — and FR-05 liveness then read our optimism
+    back as proof the customer had been warned.
+    """
+    from werefa.notifications.application import service as notifications_service
+    from werefa.shared.enums import NotificationStatus
+
+    _real_registry.result = SmsResult.sent(
+        provider="fake", provider_message_id="SM1", receipt_expected=True
+    )
+
+    row = notifications_service.dispatch(
+        session=inline_delivery.session(),  # type: ignore[arg-type]
+        user=inline_delivery.recipient(
+            _FakeUser(notification_prefs=["sms", "logger"])  # type: ignore[call-arg]
+        ),
+        payload=_payload(),
+    )
+
+    assert row is not None
+    assert row.channel == NotificationChannel.sms.value
+    assert row.status == NotificationStatus.sent.value
+
+
+def test_awaiting_a_receipt_does_not_send_the_alert_twice(
+    _real_registry: _FakeProvider, inline_delivery: Any
+) -> None:
+    """``accepted`` ends the preference walk exactly like ``delivered``.
+
+    The message is with the carrier; falling through to the logger — or
+    worse, to another remote channel — because no receipt has arrived yet
+    would double-notify everyone whose gateway is simply not instant.
+    """
+    from werefa.notifications.application import service as notifications_service
+
+    _real_registry.result = SmsResult.sent(
+        provider="fake", receipt_expected=True
+    )
+
+    notifications_service.dispatch(
+        session=inline_delivery.session(),  # type: ignore[arg-type]
+        user=inline_delivery.recipient(
+            _FakeUser(notification_prefs=["sms", "logger"])  # type: ignore[call-arg]
+        ),
+        payload=_payload(),
+    )
+
+    assert len(_real_registry.sent) == 1
+
+
+def test_a_gateway_with_no_receipts_still_settles_the_row_immediately(
+    _real_registry: _FakeProvider, inline_delivery: Any
+) -> None:
+    """``TWILIO_STATUS_CALLBACK_URL`` unset is the rollback lever.
+
+    Without it nothing will ever call back, so parking the row at 'sent'
+    would strand it forever — a worse lie than the optimism it replaced.
+    """
+    from werefa.notifications.application import service as notifications_service
+    from werefa.shared.enums import NotificationStatus
+
+    _real_registry.result = SmsResult.sent(provider="fake")
+
+    row = notifications_service.dispatch(
+        session=inline_delivery.session(),  # type: ignore[arg-type]
+        user=inline_delivery.recipient(
+            _FakeUser(notification_prefs=["sms", "logger"])  # type: ignore[call-arg]
+        ),
+        payload=_payload(),
+    )
+
+    assert row is not None
+    assert row.status == NotificationStatus.delivered.value
+
+
+def test_the_gateway_is_told_which_ledger_row_to_report_against(
+    _real_registry: _FakeProvider, inline_delivery: Any
+) -> None:
+    """Only the worker knows the row id, so only the worker can supply it.
+
+    ``dispatch`` writes the ledger row *after* it picks the channel, so a
+    payload built on the request thread has nothing to quote — the worker
+    stamps it on before handing the send to the notifier.
+    """
+    from werefa.notifications.application import service as notifications_service
+
+    row = notifications_service.dispatch(
+        session=inline_delivery.session(),  # type: ignore[arg-type]
+        user=inline_delivery.recipient(
+            _FakeUser(notification_prefs=["sms", "logger"])  # type: ignore[call-arg]
+        ),
+        payload=_payload(),
+    )
+
+    assert row is not None
+    assert _real_registry.sent[0].receipt_reference == str(row.id)
+
+
+def test_a_closed_app_gets_a_text_instead_of_a_silent_success(
+    _real_registry: _FakeProvider, inline_delivery: Any
+) -> None:
+    """The fall-through that was missing, end to end.
+
+    With the shipped preferences (``websocket`` first) a customer whose
+    app is closed produced a publish to zero subscribers, which reported
+    itself delivered. Dispatch stopped there: the ledger said the alert
+    went out, SMS was never attempted, and nothing arrived anywhere.
+
+    Nobody is subscribed here — there is no realtime coordinator running
+    at all — so the websocket channel must decline and let the gateway
+    have it.
+    """
+    from werefa.notifications.application import service as notifications_service
+    from werefa.shared.enums import NotificationStatus
+
+    row = notifications_service.dispatch(
+        session=inline_delivery.session(),  # type: ignore[arg-type]
+        user=inline_delivery.recipient(
+            _FakeUser(notification_prefs=["websocket", "sms", "logger"])  # type: ignore[call-arg]
+        ),
+        payload=_payload(),
+    )
+
+    assert len(_real_registry.sent) == 1, "the customer was never texted"
+    assert row is not None
+    assert row.channel == NotificationChannel.sms.value
+    assert row.status == NotificationStatus.delivered.value

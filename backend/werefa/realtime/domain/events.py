@@ -126,6 +126,7 @@ class NotifyEventV1(BaseModel):
         "now_serving",
         "liveness_ping_request",
         "liveness_stale",
+        "liveness_hold",
         "line_chat_update",
         "queue_cleared",
     ]

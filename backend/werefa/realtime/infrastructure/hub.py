@@ -40,8 +40,42 @@ class InMemoryQueueHub:
             total = sum(len(v) for v in self._subscribers.values())
         return total, by_line
 
-    async def local_publish(self, service_item_id: uuid.UUID, message: str) -> None:
+    async def local_publish(self, service_item_id: uuid.UUID, message: str) -> int:
+        """Fan out, and report how many subscriber queues took the message.
+
+        The count is the honest answer to "did this reach anyone?", which
+        the notification dispatcher needs and a bare success cannot give
+        it: publishing to a line nobody is watching succeeds completely
+        and delivers to nobody.
+        """
         async with self._lock:
             subs = list(self._subscribers.get(service_item_id, ()))
         for q in subs:
             await q.put(message)
+        return len(subs)
+
+    def local_publish_nowait(
+        self, service_item_id: uuid.UUID, message: str
+    ) -> int:
+        """Same fan-out as :meth:`local_publish`, completed synchronously.
+
+        Must be called **on the event loop thread**. It exists for callers
+        that have to know the publish finished before they return and cannot
+        await — specifically the notification dispatcher, whose result
+        decides whether SMS and email get tried. Scheduling a task and
+        claiming success there books an alert as delivered that may never
+        have gone out.
+
+        Nothing here can block: the queues are unbounded, so ``put_nowait``
+        always succeeds, and the snapshot is a plain list copy. The
+        ``_lock`` is deliberately not taken — acquiring it is the only await
+        in :meth:`local_publish`, and taking it would reintroduce exactly
+        the suspension this method exists to avoid. That is safe because
+        this never awaits, so no other coroutine can interleave with it, and
+        ``_subscribers`` is only ever mutated from the loop thread by
+        :meth:`subscribe` and its unsubscribe.
+        """
+        subs = list(self._subscribers.get(service_item_id, ()))
+        for q in subs:
+            q.put_nowait(message)
+        return len(subs)

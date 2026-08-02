@@ -223,6 +223,83 @@ Twilio-specific, required when `SMS_PROVIDER=twilio` (startup fails otherwise):
 * `TWILIO_API_BASE_URL`: Override the API host (default `https://api.twilio.com`),
   useful for pointing staging at a local fake.
 
+#### Delivery receipts
+
+* `TWILIO_STATUS_CALLBACK_URL`: Public URL of the delivery-status webhook, e.g.
+  `https://api.example.com/api/v1/webhooks/twilio/sms-status`. Optional, and
+  strongly recommended.
+
+Twilio returning a 201 means it *queued* the message. Whether a carrier accepted
+it, whether the handset exists, whether the number is barred — all of that comes
+back later, on this callback. With the URL unset nothing asks for one, and an SMS
+ledger row is written `delivered` the moment Twilio accepts it, which is the old
+optimistic reading: a text to a disconnected number is recorded exactly like one
+the customer acted on.
+
+Set it, and a row waits at `sent` until the carrier reports back, then moves to
+`delivered` or `failed` (with the carrier's code in `delivery_error_code`). That
+distinction is load-bearing beyond the audit trail: FR-05 liveness flags customers
+for not answering prompts, and it now checks whether the prompt actually arrived
+before counting the silence against them — see
+`backend/werefa/notifications/domain/receipts.py`.
+
+Two operational notes:
+
+* The value must be **exactly** the URL Twilio is given, character for character.
+  It is one of the inputs to the `X-Twilio-Signature` HMAC, and the webhook
+  validates against this setting rather than against the URL the request appears
+  to have arrived at (a proxy will have rewritten the scheme or host). A value
+  that disagrees with reality fails every callback silently.
+* The endpoint is unauthenticated by nature and rejects anything it cannot verify,
+  so `TWILIO_AUTH_TOKEN` must be correct or no receipt is ever recorded. Watch for
+  `twilio_status_callback_bad_signature` in the logs.
+
+* `NOTIFICATION_RECEIPT_GRACE_SECONDS` (default `300`): how long a row may sit
+  unresolved before "we do not know yet" becomes "nobody ever answered". Covers a
+  `sent` row owed a carrier receipt and a `queued` row owed the delivery worker.
+
+  This is the safety net for the failure above. If the callback URL never
+  resolves, receipts simply never arrive — and without an expiry, every SMS row
+  would stay an open question forever, which quietly restores the old unfairness
+  for every customer. Past this age liveness treats the prompt as not having
+  reached anyone: it stops blaming them for the silence *and* stops excusing it.
+
+  Keep it comfortably above the delivery retry budget, or a busy gateway starts
+  looking like an unreachable one. To tell a misconfigured webhook from genuinely
+  unreachable customers, look at `liveness_prompt_undelivered` log lines: a run of
+  them with `prompt_status=sent` is the webhook, `prompt_status=failed` is the
+  carrier, and `prompt_channel=logger` means those customers have no reachable
+  channel configured at all.
+
+#### Expect more SMS and email than before
+
+Turning receipts on is not the only change in what customers receive. The
+`websocket` channel used to report success for a publish that completed with
+**nobody subscribed** — which is every customer whose app is closed. Dispatch
+stopped there, so with the default `websocket, email, logger` preferences the
+alert was recorded as delivered and nothing was ever sent.
+
+It now declines when it can show nobody received it, and dispatch falls through to
+the next preference. A customer with `sms` in their preferences and a closed app
+therefore gets a text where they previously got silence. That is the intent — but
+it is a real change in gateway spend, so size it before enabling SMS broadly.
+
+Behind Redis the subscriber count is unknowable (they may be on another replica),
+so the publish is recorded `sent` rather than `delivered`: no fall-through, no
+double-notify, and the row ages out of "unknown" like any other unanswered wait.
+
+* `LIVENESS_AUTO_HOLD_UNREACHABLE` (default `true`): park a spot automatically
+  once we can show the prompt never reached the customer.
+
+  This is the one setting here that changes *queue* behaviour, so it is worth
+  knowing about before you turn receipts on. Without it, "we could not reach
+  them" only ever appears on the staff board, and the line's next move is Call
+  Next reaching an unreachable customer anyway, nobody answering, and a no-show
+  recorded against someone who was never spoken to. With it the spot is held
+  instead: the line moves on, their place is kept, nothing is recorded against
+  anyone. `LIVENESS_MAX_HOLDS` still caps it — after that it really is a human's
+  call, and the board says so. Look for `liveness_auto_held_unreachable`.
+
 Note that SMS only goes out to users who have `sms` in their notification
 preferences; it is not in `NOTIFICATION_DEFAULT_PREFS`, so enabling a provider
 alone does not start texting anyone.

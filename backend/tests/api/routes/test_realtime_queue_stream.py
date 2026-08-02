@@ -114,6 +114,106 @@ def test_ticket_websocket_receives_ticket_status_update(
         assert data.get("reason") == "status_update"
 
 
+def test_check_in_that_unparks_a_spot_announces_it_as_restored(
+    client: TestClient,
+    db: Session,
+    superuser_token_headers: dict[str, str],
+    normal_user_token_headers: dict[str, str],
+) -> None:
+    """The event reason has to track what actually changed in the row.
+
+    A check-in during a hold clears the park and makes the ticket callable
+    again, so subscribers need the ``liveness_restored`` transition to
+    redraw. Sending it while Call Next still skipped the ticket — or
+    withholding it once Call Next no longer does — is how boards ended up
+    disagreeing with the counter.
+    """
+    sid = _create_service(client, db, superuser_token_headers)
+    join = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/join",
+        headers=normal_user_token_headers,
+        json={},
+    )
+    assert join.status_code == 200, join.text
+    ticket_id = join.json()["id"]
+
+    held = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/tickets/{ticket_id}"
+        "/liveness/hold",
+        headers=superuser_token_headers,
+        json={},
+    )
+    assert held.status_code == 200, held.text
+
+    login = client.post(
+        f"{settings.API_V1_STR}/login/access-token",
+        data={
+            "username": settings.FIRST_SUPERUSER,
+            "password": settings.FIRST_SUPERUSER_PASSWORD,
+        },
+    )
+    assert login.status_code == 200, login.text
+    q = quote(login.json()["access_token"], safe="")
+
+    with client.websocket_connect(
+        f"{settings.API_V1_STR}/ws/service-items/{sid}/stream?token={q}"
+    ) as wsc:
+        ping = client.post(
+            f"{settings.API_V1_STR}/service-items/{sid}/tickets/{ticket_id}"
+            "/position",
+            headers=normal_user_token_headers,
+            json={},
+        )
+        assert ping.status_code == 200, ping.text
+        assert ping.json()["liveness_hold_until"] is None
+
+        data = json.loads(wsc.receive_text())
+        assert data.get("ticket_id") == ticket_id
+        assert data.get("reason") == "liveness_restored"
+        assert data.get("status") == "waiting"
+
+
+def test_a_check_in_with_no_park_in_play_is_only_a_ping(
+    client: TestClient,
+    db: Session,
+    superuser_token_headers: dict[str, str],
+    normal_user_token_headers: dict[str, str],
+) -> None:
+    """Nothing was restored, so nothing claims to have been."""
+    sid = _create_service(client, db, superuser_token_headers)
+    join = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/join",
+        headers=normal_user_token_headers,
+        json={},
+    )
+    assert join.status_code == 200, join.text
+    ticket_id = join.json()["id"]
+
+    login = client.post(
+        f"{settings.API_V1_STR}/login/access-token",
+        data={
+            "username": settings.FIRST_SUPERUSER,
+            "password": settings.FIRST_SUPERUSER_PASSWORD,
+        },
+    )
+    assert login.status_code == 200, login.text
+    q = quote(login.json()["access_token"], safe="")
+
+    with client.websocket_connect(
+        f"{settings.API_V1_STR}/ws/service-items/{sid}/stream?token={q}"
+    ) as wsc:
+        ping = client.post(
+            f"{settings.API_V1_STR}/service-items/{sid}/tickets/{ticket_id}"
+            "/position",
+            headers=normal_user_token_headers,
+            json={},
+        )
+        assert ping.status_code == 200, ping.text
+
+        data = json.loads(wsc.receive_text())
+        assert data.get("reason") == "liveness_ping"
+
+
 def test_service_websocket_multiple_clients_get_same_event(
     client: TestClient,
     db: Session,

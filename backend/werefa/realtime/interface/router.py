@@ -3,6 +3,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, status
 from pydantic import ValidationError
@@ -86,42 +87,63 @@ async def _stream_service_messages(
         )
         return
     q, unsubscribe = await coordinator.hub.subscribe(service_item_id)
+    # Both waits are created once and only the leg that *completed* is
+    # re-armed. The previous version rebuilt both every iteration and
+    # cancelled the queue leg whenever the socket leg won, which lost
+    # events two ways:
+    #
+    # * when both legs completed in the same ``wait()`` the socket branch
+    #   ran, ``continue``d, and threw away the already-dequeued message; and
+    # * cancelling a pending ``q.get()`` races the producer handing an item
+    #   to that exact getter.
+    #
+    # Both get likelier the busier the line is — a client ping arriving
+    # alongside a Call Next event is all it takes — which is why this read
+    # as "unreliable under load" rather than as a clean, reproducible bug.
+    recv_task: asyncio.Task[Any] = asyncio.create_task(websocket.receive())
+    get_task: asyncio.Task[str] = asyncio.create_task(q.get())
     try:
         while True:
-            recv_task = asyncio.create_task(websocket.receive())
-            get_task: asyncio.Task[str] = asyncio.create_task(q.get())
             done, _ = await asyncio.wait(
                 {recv_task, get_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
+
+            # Drain the queue leg first and *always* consume its result,
+            # even when the socket leg is also ready in this same wake-up.
+            if get_task in done:
+                try:
+                    message = get_task.result()
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    logger.exception("Queue get failed")
+                    break
+                # Re-arm before the send so a publish landing mid-send is
+                # parked in the queue instead of missing a subscriber.
+                get_task = asyncio.create_task(q.get())
+                if message_filter(message):
+                    if websocket.client_state != WebSocketState.CONNECTED:
+                        break
+                    try:
+                        await websocket.send_text(message)
+                    except WebSocketDisconnect:
+                        break
+
             if recv_task in done:
-                if not get_task.done():
-                    get_task.cancel()
                 try:
                     rmsg = recv_task.result()
                 except WebSocketDisconnect:
                     break
                 if rmsg.get("type") == "websocket.disconnect":
                     break
-                continue
-            if not recv_task.done():
-                recv_task.cancel()
-            try:
-                message = get_task.result()
-            except Exception:
-                logger.exception("Queue get failed")
-                break
-            if not message_filter(message):
-                continue
-            if websocket.client_state != WebSocketState.CONNECTED:
-                break
-            try:
-                await websocket.send_text(message)
-            except WebSocketDisconnect:
-                break
+                recv_task = asyncio.create_task(websocket.receive())
     except WebSocketDisconnect:
         pass
     finally:
+        for pending in (recv_task, get_task):
+            if not pending.done():
+                pending.cancel()
         await unsubscribe()
         if websocket.client_state == WebSocketState.CONNECTED:
             try:

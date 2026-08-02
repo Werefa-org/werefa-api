@@ -171,15 +171,15 @@ def test_repeated_evaluations_do_not_duplicate_alerts(
     assert len(notes) == 1, "smart-alert pass must be idempotent on no-op"
 
 
-def test_call_next_promotes_remaining_customer_to_you_are_next(
+def test_call_next_sends_get_ready_while_someone_is_already_serving(
     client: TestClient,
     db: Session,
     superuser_token_headers: dict[str, str],
 ) -> None:
-    """When the head ticket is dequeued, the next ticket rises to pos 1
-    and should receive its own ``you_are_next`` alert — even though it
-    previously sat at position 2 with no alert."""
-
+    """After the head is called, the remaining ticket sits at depth 2
+    (serving + waiting counted by ticket number) and gets the get-ready
+    alert — then now_serving when they themselves are called.
+    """
     _, sid = _create_provider_and_service(
         client=client, db=db, superuser_token_headers=superuser_token_headers
     )
@@ -194,9 +194,6 @@ def test_call_next_promotes_remaining_customer_to_you_are_next(
         )
         assert r.status_code == 200
 
-    # Two call-nexts: first promotes A waiting->serving (position
-    # already 1, no new alert for A); second completes A and promotes B
-    # to serving with position 1 -> B should get you_are_next now.
     for _ in range(2):
         r = client.post(
             f"{settings.API_V1_STR}/service-items/{sid}/call-next",
@@ -205,9 +202,122 @@ def test_call_next_promotes_remaining_customer_to_you_are_next(
         assert r.status_code == 200
 
     b_notes = _list_notifications(client, h_b)
+    kinds = {n["kind"] for n in b_notes}
+    assert NotificationKind.head_to_counter.value in kinds, b_notes
+    assert NotificationKind.now_serving.value in kinds, b_notes
+
+
+def test_you_are_next_follows_the_vip_call_order_not_ticket_numbers(
+    client: TestClient,
+    db: Session,
+    superuser_token_headers: dict[str, str],
+) -> None:
+    """The alert has to name the ticket Call Next is about to serve.
+
+    Alert depth used to be counted by ticket number, which is stable and
+    wrong: bump a later ticket to VIP and the counter serves them while
+    "you're next — head to the counter now" goes to whoever holds the
+    lowest number. Two customers walk up, one of them for nothing.
+    """
+    _, sid = _create_provider_and_service(
+        client=client, db=db, superuser_token_headers=superuser_token_headers
+    )
+    _, h_early = _customer(client, db)
+    _, h_late = _customer(client, db)
+
+    early = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/join", headers=h_early, json={}
+    )
+    assert early.status_code == 200, early.text
+    late = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/join", headers=h_late, json={}
+    )
+    assert late.status_code == 200, late.text
+    late_tid = late.json()["id"]
+
+    bump = client.patch(
+        f"{settings.API_V1_STR}/service-items/{sid}/tickets/{late_tid}/priority",
+        headers=superuser_token_headers,
+        json={"priority": 5},
+    )
+    assert bump.status_code == 200, bump.text
+
+    late_notes = _list_notifications(client, h_late)
+    assert [n["kind"] for n in late_notes] == [
+        NotificationKind.you_are_next.value
+    ], late_notes
+    assert late_notes[0]["position"] == 1
+
+    # The earlier ticket number keeps the one alert it earned at join time
+    # and gains nothing from being overtaken.
+    early_notes = _list_notifications(client, h_early)
+    assert len(early_notes) == 1, early_notes
+
+
+def test_a_parked_customer_is_not_told_to_head_to_the_counter(
+    client: TestClient,
+    db: Session,
+    superuser_token_headers: dict[str, str],
+) -> None:
+    """A hold and a "you're next" cannot both be true.
+
+    Call Next deliberately passes over a parked spot, so the alert belongs
+    to the ticket behind it. Sending it to the parked customer contradicts
+    the hold message they just received and points them at a counter that
+    is not going to call them.
+    """
+    _, sid = _create_provider_and_service(
+        client=client, db=db, superuser_token_headers=superuser_token_headers
+    )
+    _, h_parked = _customer(client, db)
+    _, h_behind = _customer(client, db)
+    _, h_last = _customer(client, db)
+
+    parked = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/join", headers=h_parked, json={}
+    )
+    assert parked.status_code == 200, parked.text
+    parked_tid = parked.json()["id"]
+    assert (
+        client.post(
+            f"{settings.API_V1_STR}/service-items/{sid}/join",
+            headers=h_behind,
+            json={},
+        ).status_code
+        == 200
+    )
+    before = len(_list_notifications(client, h_parked))
+
+    held = client.post(
+        f"{settings.API_V1_STR}/service-items/{sid}/tickets/{parked_tid}"
+        "/liveness/hold",
+        headers=superuser_token_headers,
+        json={},
+    )
+    assert held.status_code == 200, held.text
+
+    # A third join re-runs the alert pass with the park in place.
+    assert (
+        client.post(
+            f"{settings.API_V1_STR}/service-items/{sid}/join",
+            headers=h_last,
+            json={},
+        ).status_code
+        == 200
+    )
+
+    behind_notes = _list_notifications(client, h_behind)
     assert any(
-        n["kind"] == NotificationKind.you_are_next.value for n in b_notes
-    ), b_notes
+        n["kind"] == NotificationKind.you_are_next.value for n in behind_notes
+    ), behind_notes
+
+    parked_notes = _list_notifications(client, h_parked)
+    assert not any(
+        n["kind"] == NotificationKind.head_to_counter.value for n in parked_notes
+    ), parked_notes
+    # The hold notification is the only thing the park earned them.
+    assert len(parked_notes) == before + 1
+    assert parked_notes[0]["kind"] == NotificationKind.liveness_hold.value
 
 
 def test_patch_prefs_persists_and_lists_in_user_payload(

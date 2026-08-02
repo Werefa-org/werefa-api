@@ -20,9 +20,15 @@ from werefa.notifications.infrastructure.sms.rendering import (
     render_sms_body,
     segment_count,
 )
-from werefa.notifications.infrastructure.sms.twilio import TwilioSmsProvider
+from werefa.notifications.infrastructure.sms.twilio import (
+    RECEIPT_REFERENCE_PARAM,
+    TwilioSmsProvider,
+    classify_status,
+    validate_signature,
+)
 
 __all__ = [
+    "RECEIPT_REFERENCE_PARAM",
     "ConsoleSmsProvider",
     "DisabledSmsProvider",
     "SmsMessage",
@@ -31,6 +37,7 @@ __all__ = [
     "SmsResult",
     "TwilioSmsProvider",
     "build_sms_provider",
+    "classify_status",
     "get_sms_provider",
     "known_sms_providers",
     "register_sms_provider",
@@ -38,4 +45,5 @@ __all__ = [
     "segment_count",
     "set_sms_provider",
     "to_e164",
+    "validate_signature",
 ]

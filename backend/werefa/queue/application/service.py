@@ -9,6 +9,7 @@ from werefa.core.config import settings
 from werefa.providers.infrastructure import repo as provider_repo
 from werefa.queue.application import customer_governance_service
 from werefa.queue.application import join_invite_service
+from werefa.queue.application import line_order
 from werefa.queue.domain import ticket_rules
 from werefa.shared.enums import TicketSource, TicketStatus
 from werefa.shared.models import Provider, QueueEntry, Review, ServiceItem, User, utcnow
@@ -49,6 +50,20 @@ def assert_single_active_ticket(session: Session, user_id: uuid.UUID) -> None:
 
 
 def get_service_for_update(session: Session, service_item_id: uuid.UUID) -> ServiceItem:
+    """Acquire the service line's queue mutex.
+
+    The ``ServiceItem`` row is the single lock protecting the *order* of a
+    line. Every write that can change who Call Next will serve — calling,
+    joining, priority changes, holds and their release, and any transition
+    out of an active status — must take this lock before reading the
+    tickets it decides from, and hold it until commit.
+
+    Taking it in only *some* of those paths is the same as not having it.
+    ``FOR UPDATE`` on this row excludes nothing but another reader of this
+    same row, so a writer that skips it runs fully concurrently with a
+    Call Next that took it, and READ COMMITTED then lets Call Next act on
+    an ordering that was already stale when it read it.
+    """
     statement = (
         select(ServiceItem).where(ServiceItem.id == service_item_id).with_for_update()
     )
@@ -275,7 +290,7 @@ def list_queue_entries(
     statement = (
         select(QueueEntry)
         .where(QueueEntry.service_item_id == service_item_id)
-        .order_by(col(QueueEntry.priority).desc(), col(QueueEntry.joined_at))
+        .order_by(*line_order.call_order())
     )
     return session.exec(statement).all()
 
@@ -285,16 +300,36 @@ def call_next(session: Session, service_item_id: uuid.UUID) -> QueueEntry | None
     return nxt
 
 
+def _next_callable(
+    session: Session, service_item_id: uuid.UUID
+) -> QueueEntry | None:
+    """First waiting ticket whose spot is not currently parked (FR-05).
+
+    The ordering itself lives in :mod:`werefa.queue.application.line_order`
+    so the liveness watch window and the FR-07 alerts can predict exactly
+    who this returns — they used to guess, and guessed differently.
+
+    ``for_update`` because this is the claiming read: whoever comes back
+    from here is about to be moved to ``serving``.
+    """
+    return line_order.next_callable(
+        session, service_item_id, now=utcnow(), for_update=True
+    )
+
+
 def call_next_transition(
     session: Session, service_item_id: uuid.UUID
 ) -> tuple[QueueEntry | None, QueueEntry | None]:
     get_service_for_update(session, service_item_id)
 
+    # Locked too: this row is about to be completed, and a concurrent
+    # status change on it would otherwise be silently overwritten.
     current = session.exec(
         select(QueueEntry)
         .where(QueueEntry.service_item_id == service_item_id)
         .where(QueueEntry.status == TicketStatus.serving.value)
         .order_by(col(QueueEntry.joined_at))
+        .with_for_update()
     ).first()
 
     if current:
@@ -302,12 +337,7 @@ def call_next_transition(
         current.completed_at = utcnow()
         session.add(current)
 
-    nxt = session.exec(
-        select(QueueEntry)
-        .where(QueueEntry.service_item_id == service_item_id)
-        .where(QueueEntry.status == TicketStatus.waiting.value)
-        .order_by(col(QueueEntry.priority).desc(), col(QueueEntry.joined_at))
-    ).first()
+    nxt = _next_callable(session, service_item_id)
 
     if not nxt:
         session.commit()
@@ -315,6 +345,8 @@ def call_next_transition(
             session.refresh(current)
         return current, None
 
+    # Calling a ticket settles it either way, so an active hold is spent.
+    nxt.liveness_hold_until = None
     nxt.status = TicketStatus.serving.value
     # FR-06: stamp the moment we begin serving so the WMA can compute a real
     # serve duration on completion.
@@ -345,6 +377,11 @@ def cancel_my_ticket(
     ticket = session.get(QueueEntry, ticket_id)
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    # Unlocked peek only to learn which line to lock; the ticket is re-read
+    # below under the mutex. Service row first, then tickets — every path
+    # takes them in that order, which is what keeps them deadlock-free.
+    get_service_for_update(session, ticket.service_item_id)
+    session.refresh(ticket)
     if ticket.user_id is None or ticket.user_id != user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -394,6 +431,9 @@ def set_ticket_status(
     service_item_id: uuid.UUID,
     new_status: TicketStatus,
 ) -> QueueEntry:
+    # Terminal transitions remove a ticket from the line, so this decides
+    # who Call Next serves and owes the line the same mutex.
+    get_service_for_update(session, service_item_id)
     ticket = session.get(QueueEntry, ticket_id)
     if not ticket or ticket.service_item_id != service_item_id:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -506,7 +546,26 @@ def set_ticket_priority(
     ticket_id: uuid.UUID,
     priority: int,
 ) -> QueueEntry:
-    """Staff can manually set VIP (priority=1) or remove it (priority=0)."""
+    """Staff can manually set VIP (priority=1) or remove it (priority=0).
+
+    Takes the line's queue mutex first. A priority change *is* a change to
+    the call order, so running it unlocked let this interleaving lose the
+    bump entirely:
+
+    * staff A runs Call Next, which locks the service row and reads the
+      order — seeing the ordinary customer at the front;
+    * staff B bumps a VIP to ``priority=1`` and commits, unimpeded, because
+      it never asked for the lock;
+    * staff A commits, having served the customer it read *before* the
+      bump landed.
+
+    The VIP was promoted and then passed over, and nothing in the data
+    afterwards showed a conflict had happened. With the lock the two
+    serialise in one order or the other, and both orders are defensible:
+    either the bump lands first and the VIP is called, or the call lands
+    first and the VIP is next.
+    """
+    get_service_for_update(session, service_item_id)
     ticket = session.get(QueueEntry, ticket_id)
     if ticket is None or ticket.service_item_id != service_item_id:
         raise HTTPException(status_code=404, detail="Ticket not found")

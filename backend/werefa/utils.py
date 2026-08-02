@@ -114,7 +114,8 @@ def queue_notification_subject(kind: str) -> str:
         "you_are_next": "You're next in line",
         "now_serving": "You're being served now",
         "liveness_ping_request": "Share your location",
-        "liveness_stale": "Location check needed",
+        "liveness_stale": "Check in to keep your spot",
+        "liveness_hold": "Your spot is being held",
         "line_chat_update": "New line chat message",
         "queue_cleared": "Queue closed",
     }

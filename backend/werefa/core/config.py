@@ -147,12 +147,42 @@ class Settings(BaseSettings):
     # list of channels new users start with — the first deliverable
     # channel wins per dispatch.
     LIVENESS_TOP_K: int = 3
-    # FR-05: after entering top-K remotely, the customer must ping within this
-    # many seconds or the ticket is ``flagged`` (hint for staff — not auto strike).
+    # FR-05: after entering top-K remotely, the customer must check in within
+    # this many seconds or the window counts as missed (hint for staff — never
+    # an automatic strike).
     LIVENESS_GRACE_SECONDS: int = 600
+    # How many *consecutive* missed windows before the ticket is ``flagged``.
+    # One missed window is a nudge, not a verdict: phones sleep, lifts have no
+    # signal, and the first miss is far more often a dead radio than a
+    # no-show. The customer gets a warning ping and a second full window.
+    LIVENESS_MISSES_BEFORE_FLAG: int = Field(default=2, ge=1)
+    # How recent a background poll (or location fix) has to be before staff
+    # are told about it. Presentation only: passive app traffic never clears
+    # a grace window or stops a flag, because an app left open at home would
+    # otherwise make a genuine absentee unflaggable. Only a deliberate
+    # check-in clears a window — with or without coordinates.
+    LIVENESS_ACTIVITY_GRACE_SECONDS: int = Field(default=600, ge=1)
+    # How long a held spot is kept while the line moves past it.
+    LIVENESS_HOLD_SECONDS: int = Field(default=300, ge=30)
+    # Cap on holds per ticket so an unreachable customer cannot stall the
+    # line forever. Once spent, the recommendation reverts to "call them",
+    # and the normal call → no-show path (with its strike) applies.
+    LIVENESS_MAX_HOLDS: int = Field(default=2, ge=0)
     # FR-05 sync can add ledger rows; turn off in tests that assert strict
     # FR-07 notification counts.
     LIVENESS_ENABLED: bool = True
+    # Park a spot automatically when a grace window expires and we can show
+    # the prompt never reached the customer.
+    #
+    # Without this, "we could not reach them" only ever appeared on the
+    # staff board, so an unreachable customer stayed at the head of the
+    # line until somebody happened to look — and the line's next move was
+    # Call Next reaching them anyway, nobody answering, and a no-show
+    # against a customer who was never spoken to. A hold is the module's
+    # own remedy: the line moves on, the place is kept, nothing is
+    # recorded against anyone. ``LIVENESS_MAX_HOLDS`` still caps it, after
+    # which it really is a human's call.
+    LIVENESS_AUTO_HOLD_UNREACHABLE: bool = True
     NOTIFICATION_DEFAULT_PREFS: list[str] = ["websocket", "email", "logger"]
 
     # --- Off-request delivery (FR-07) ---
@@ -187,6 +217,45 @@ class Settings(BaseSettings):
     NOTIFICATION_DELIVERY_RETRY_JITTER: float = Field(default=0.2, ge=0, lt=1)
     # How long shutdown waits for in-flight sends before dropping the rest.
     NOTIFICATION_DELIVERY_SHUTDOWN_SECONDS: float = Field(default=5.0, gt=0)
+
+    # --- Startup reconciliation of stuck rows (FR-07) ---
+    # The worker holds jobs in memory, so a crash — or a shutdown that drops
+    # what is still queued — leaves ledger rows reading ``queued`` with
+    # nobody left to resolve them. On boot we sweep those up: a row whose
+    # message still holds goes back to the worker, the rest are recorded
+    # ``failed`` so a stuck notification is never silent.
+    NOTIFICATION_RECONCILE_ON_STARTUP: bool = True
+    # Floor on age before a ``queued`` row is treated as abandoned. This must
+    # stay above the longest a *live* worker can legitimately sit on a row,
+    # or a rolling deploy will have the new process re-send what the old one
+    # is still delivering. That ceiling is the retry budget
+    # (``MAX_ATTEMPTS`` sends, each up to ``SMS_TIMEOUT_SECONDS``, spaced by
+    # backoff capped at ``RETRY_MAX_SECONDS``) plus ``SHED_TTL_SECONDS`` of
+    # overflow parking — a bit over three minutes at the defaults here. Five
+    # leaves room.
+    NOTIFICATION_RECONCILE_MIN_AGE_SECONDS: float = Field(default=300.0, gt=0)
+    # Ceiling past which even a still-true message is dropped rather than
+    # sent. Set this below the floor above to turn retries off entirely and
+    # have reconciliation only resolve rows.
+    NOTIFICATION_RECONCILE_MAX_AGE_SECONDS: float = Field(default=3600.0, gt=0)
+    # Cap on one sweep. A long outage can strand thousands of rows, and boot
+    # is the worst moment to walk all of them; the remainder is logged and
+    # picked up by the next restart.
+    NOTIFICATION_RECONCILE_MAX_ROWS: int = Field(default=500, ge=1)
+
+    # How long a ledger row may sit unresolved before "we do not know yet"
+    # becomes "nobody ever answered". Covers both waits: a ``queued`` row
+    # owed by the delivery worker, and a ``sent`` row owed a carrier
+    # receipt. Twilio's status callbacks arrive in seconds and the retry
+    # budget is well under a minute, so anything past this is a silent
+    # failure — most often a status-callback URL that never resolved.
+    #
+    # Read by ``notifications.domain.receipts.reach_of``, and therefore by
+    # FR-05 liveness: past this age the row stops excusing a customer's
+    # silence *and* stops blaming them for it, because we can no longer
+    # show they were told. Keep it comfortably above the delivery retry
+    # budget or a busy gateway starts looking like an unreachable one.
+    NOTIFICATION_RECEIPT_GRACE_SECONDS: float = Field(default=300.0, gt=0)
 
     MAX_FAILED_LOGIN_ATTEMPTS: int = 5
     LOGIN_LOCKOUT_MINUTES: int = 15
@@ -274,6 +343,22 @@ class Settings(BaseSettings):
     TWILIO_MESSAGING_SERVICE_SID: str | None = None
     # Overridable so tests and staging can point at a local fake.
     TWILIO_API_BASE_URL: str = "https://api.twilio.com"
+    # Public URL of ``POST /api/v1/webhooks/twilio/sms-status``, e.g.
+    # https://api.example.com/api/v1/webhooks/twilio/sms-status
+    #
+    # Unset means "do not ask for delivery receipts", and the ledger falls
+    # back to recording Twilio's acceptance as delivery — the old, and
+    # optimistic, reading. Set it and a message stays ``sent`` until the
+    # carrier reports back, which is what lets the liveness flow tell "they
+    # ignored the warning" from "the warning never arrived".
+    #
+    # It must be the URL Twilio is actually given, character for
+    # character: it is one of the inputs to the ``X-Twilio-Signature``
+    # HMAC, so a value that disagrees with reality fails every callback
+    # silently rather than loudly. That is also why the webhook validates
+    # against this setting rather than against the URL the request seems
+    # to have arrived at, which a proxy will have rewritten.
+    TWILIO_STATUS_CALLBACK_URL: str | None = None
 
     # Deprecated: superseded by ``SMS_PROVIDER=console``. Still honoured so
     # existing .env files keep working — see ``_apply_legacy_sms_stub_flag``.

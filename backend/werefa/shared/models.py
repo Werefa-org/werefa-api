@@ -20,8 +20,10 @@ from werefa.shared.enums import (
     ApprovalQueueOrder,
     BroadcastSeverity,
     JoinDocumentKind,
+    LivenessAction,
     LivenessState,
     MembershipRole,
+    NotificationReach,
     TicketStatus,
     UserType,
     VerificationStatus,
@@ -475,6 +477,28 @@ class QueueEntry(QueueEntryBase, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    # Last background poll from the ticket holder's app (queue snapshot,
+    # liveness read). Evidence for staff only — it never clears a grace
+    # window, so "their app is online but silent" is visible without an
+    # idle app being able to hold a spot. Only a deliberate check-in
+    # re-arms ``liveness_deadline_at``.
+    liveness_last_seen_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    # Consecutive missed grace windows. Reset by any contact; a single miss
+    # only earns a nudge (see ``LIVENESS_MISSES_BEFORE_FLAG``).
+    liveness_misses: int = Field(default=0, ge=0)
+    # Staff parked this spot: the line calls past it until this moment. The
+    # ticket stays ``waiting`` throughout — a hold is never a terminal
+    # status and never accrues a strike.
+    liveness_hold_until: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    # How many times this ticket has been held, capped by
+    # ``LIVENESS_MAX_HOLDS`` so one silent customer cannot stall the line.
+    liveness_hold_count: int = Field(default=0, ge=0)
     # Set when staff clears the line (e.g. end of day). Ticket rows stay for analytics.
     close_reason: str | None = Field(default=None, max_length=32)
     approved_at: datetime | None = Field(
@@ -662,6 +686,9 @@ class QueueEntryPublic(QueueEntryBase):
     completed_at: datetime | None = None
     liveness_state: str = Field(default=LivenessState.idle.value, max_length=16)
     liveness_deadline_at: datetime | None = None
+    liveness_last_seen_at: datetime | None = None
+    liveness_hold_until: datetime | None = None
+    liveness_hold_count: int = 0
     close_reason: str | None = None
     approved_at: datetime | None = None
     user_full_name: str | None = None
@@ -707,6 +734,21 @@ class ClearQueueResult(SQLModel):
     cleared_count: int = 0
     notified_count: int = 0
     is_paused: bool = True
+
+
+class ReopenQueueResult(SQLModel):
+    """Outcome of reopening a line after an end-of-day clear.
+
+    ``is_paused`` is this line's own flag. ``provider_is_paused`` and
+    ``remote_joins_open`` are reported because a line-level reopen is not
+    on its own enough to let customers back in: a business-wide pause, a
+    closed business, or an inactive service each still refuse remote joins,
+    and staff need to see which one is holding the door shut.
+    """
+
+    is_paused: bool = False
+    provider_is_paused: bool = False
+    remote_joins_open: bool = True
 
 
 class QueueAheadPreview(SQLModel):
@@ -765,9 +807,23 @@ class KioskSyncBatchOut(SQLModel):
 
 
 class PositionPingCreate(SQLModel):
-    latitude: float = Field(ge=-90, le=90)
-    longitude: float = Field(ge=-180, le=180)
+    """Customer check-in. Coordinates are *optional* (FR-05).
+
+    A client with location permission denied, a cold GPS, or no fix indoors
+    should still post an empty body: that is a valid "I am still here" and
+    keeps the ticket out of the flagged path. Only a request carrying
+    coordinates writes a :class:`PositionPing` row.
+    """
+
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
     accuracy_m: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _coords_paired(self) -> Self:
+        if (self.latitude is None) ^ (self.longitude is None):
+            raise ValueError("latitude and longitude must be supplied together")
+        return self
 
 
 class LivenessPublic(SQLModel):
@@ -778,6 +834,70 @@ class LivenessPublic(SQLModel):
     last_latitude: float | None = None
     last_longitude: float | None = None
     last_accuracy_m: int | None = None
+    # Evidence + next step. ``liveness_state`` alone never told staff what
+    # to do about it; these do.
+    last_seen_at: datetime | None = None
+    misses: int = 0
+    hold_until: datetime | None = None
+    hold_count: int = 0
+    recommended_action: str = LivenessAction.none.value
+    recommended_reason: str = ""
+    can_hold: bool = False
+
+
+class LivenessBoardRow(SQLModel):
+    """One line of the staff-facing liveness board."""
+
+    ticket_id: uuid.UUID
+    ticket_number: int = Field(ge=1)
+    position: int = Field(ge=1)
+    user_full_name: str | None = None
+    user_phone: str | None = None
+    liveness_state: str
+    liveness_deadline_at: datetime | None = None
+    last_ping_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    misses: int = 0
+    hold_until: datetime | None = None
+    hold_count: int = 0
+    warning_reach: str = NotificationReach.unconfirmed.value
+    """Whether the last prompt actually reached this customer.
+
+    On the board because a red badge without it invites the wrong
+    conclusion: "no check-in for 12 minutes" reads as someone ignoring
+    their phone, and looks identical when the truth is that the carrier
+    rejected every text we sent. ``recommended_reason`` says the same
+    thing in words; this is the machine-readable half, so a client can
+    style the row rather than parse prose.
+    """
+
+    recommended_action: str = LivenessAction.none.value
+    recommended_reason: str = ""
+    can_hold: bool = False
+
+
+class LivenessBoardPublic(SQLModel):
+    data: list[LivenessBoardRow]
+    count: int
+
+
+class LivenessHoldCreate(SQLModel):
+    hold_seconds: int | None = Field(default=None, ge=30, le=3600)
+
+
+class LivenessHoldResult(SQLModel):
+    """Outcome of parking (or releasing) a spot.
+
+    ``status`` is echoed so callers can see for themselves that a hold left
+    the ticket ``waiting`` — no terminal status, no strike.
+    """
+
+    ticket_id: uuid.UUID
+    status: str
+    hold_until: datetime | None = None
+    hold_count: int = 0
+    position: int | None = Field(default=None, ge=1)
+    message: str = ""
 
 
 class QueueEntriesPublic(SQLModel):
@@ -1022,18 +1142,57 @@ class Notification(NotificationBase, table=True):
     dispatch time (or ``logger`` if everything else failed, since
     ``LoggerNotifier`` always succeeds).
 
-    Rows are append-only *except* for ``read_at`` and for the one
-    transition the delivery worker owns: a remote channel (SMS, email) is
-    written ``queued`` by ``dispatch`` and later rewritten by
-    ``deliver_job`` with the channel that actually delivered and a final
-    ``delivered``/``failed`` status. A row still reading ``queued`` well
-    after ``created_at`` means the worker lost the job, most likely to a
-    restart.
+    Rows are append-only *except* for ``read_at`` and for the transitions
+    the delivery machinery owns: a remote channel (SMS, email) is written
+    ``queued`` by ``dispatch`` and later rewritten by ``deliver_job`` with
+    the channel that actually delivered and a final status. A row still
+    reading ``queued`` well after ``created_at`` means the worker lost the
+    job, most likely to a restart — ``werefa.notifications.application.
+    reconcile`` sweeps those up on the next boot.
+
+    ``delivered`` on an SMS row used to mean "Twilio returned a 201",
+    which is acceptance and not arrival. Where delivery receipts are
+    configured the worker writes ``sent`` instead, and the carrier's
+    callback moves it to ``delivered`` or ``failed`` — see
+    ``werefa.notifications.domain.receipts``. That distinction is not
+    cosmetic: FR-05 liveness reads these rows to decide whether a silent
+    customer ever *got* the prompt they are being judged for ignoring.
     """
 
     __tablename__ = "notification"
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    provider_message_id: str | None = Field(default=None, max_length=64)
+    """The gateway's own id for this message (Twilio's ``MessageSid``).
+
+    Written when a delivery receipt arrives, not when the message is
+    accepted — the row is correlated by id in the callback URL, so this
+    is here to make a row traceable in the vendor's console rather than
+    to look one up by.
+    """
+
+    delivery_error_code: str | None = Field(default=None, max_length=16)
+    """Carrier reason for a ``failed`` receipt (Twilio's ``ErrorCode``).
+
+    Kept because "the SMS did not arrive" has very different answers
+    depending on the code — 30003 is a handset that is off, 30006 a
+    landline, 30007 a carrier filter — and the first two are the
+    customer's bad luck while the third is ours to fix.
+    """
+    delivery_attempts: int = Field(default=0, ge=0)
+    """How many times this row's message has been handed to a gateway.
+
+    Written **and committed before** the provider call, never after, which
+    is the whole point: a process that dies mid-send leaves the row
+    ``queued`` either way, and this is the only evidence distinguishing
+    "the job never left the queue" from "a text may already be on
+    somebody's phone". Reconciliation re-sends only the former — see
+    :func:`werefa.notifications.domain.reconcile.decide_reconcile`.
+
+    Deliberately not on ``NotificationBase``: it is delivery bookkeeping,
+    not something ``NotificationPublic`` should carry.
+    """
+
     user_id: uuid.UUID = Field(
         foreign_key="user.id", ondelete="CASCADE", index=True
     )

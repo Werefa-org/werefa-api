@@ -12,6 +12,14 @@ channel the ledger row is written ``queued`` and *resolved later* by
 :func:`deliver_job`, which also owns the fall-through to the next
 preference — only the worker can know whether SMS actually worked.
 
+Even the worker only knows half of it. A gateway answers "I took this",
+not "they got this", so where delivery receipts are configured the row is
+resolved to ``sent`` and a third writer — :func:`record_delivery_receipt`,
+called from the webhook minutes later — settles it. The three writers see
+the row in different states and are allowed different things; the rules
+live in :mod:`werefa.notifications.domain.receipts` rather than being
+spread across the functions that apply them.
+
 Jobs are handed over on ``after_commit`` rather than at dispatch time.
 Two reasons: the worker reads the ledger row from its own session, so
 the row has to exist; and a transaction that rolls back must not have
@@ -23,7 +31,9 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import datetime
+from typing import ClassVar
 
 from fastapi import HTTPException, status
 from sqlalchemy import event, func
@@ -32,6 +42,12 @@ from sqlmodel import Session, col, select
 
 from werefa.core.config import settings
 from werefa.core.db import engine
+from werefa.notifications.domain.receipts import (
+    RECEIPT_CHANNELS,
+    ReceiptOutcome,
+    decide_receipt,
+    reach_of,
+)
 from werefa.notifications.domain.retry import RetryPolicy
 from werefa.notifications.domain.triggers import decide_alert
 from werefa.notifications.infrastructure.delivery import (
@@ -40,6 +56,7 @@ from werefa.notifications.infrastructure.delivery import (
     DeliveryQueue,
 )
 from werefa.notifications.notifier import (
+    SENT_OUTCOMES,
     DeliveryOutcome,
     NotificationPayload,
     Notifier,
@@ -50,6 +67,7 @@ from werefa.notifications.notifier import (
 from werefa.shared.enums import (
     NotificationChannel,
     NotificationKind,
+    NotificationReach,
     NotificationStatus,
     TicketStatus,
 )
@@ -72,6 +90,7 @@ EMAIL_COPY_KINDS: frozenset[NotificationKind] = frozenset(
         NotificationKind.now_serving,
         NotificationKind.liveness_ping_request,
         NotificationKind.liveness_stale,
+        NotificationKind.liveness_hold,
         NotificationKind.line_chat_update,
         NotificationKind.queue_cleared,
     }
@@ -174,6 +193,41 @@ def _user_prefs(user: User) -> list[NotificationChannel]:
     return out
 
 
+def _email_is_a_copy(
+    kind: NotificationKind, prefs: list[NotificationChannel]
+) -> bool:
+    """Is email going out as an extra *copy* rather than as the primary?
+
+    When it is, ``dispatch`` steps over email in the preference walk and
+    in every fall-through list, and sends it separately with no ledger row
+    of its own — see :func:`_try_email_copy`.
+    """
+    return kind in EMAIL_COPY_KINDS and NotificationChannel.email in prefs
+
+
+def delivery_fallbacks(
+    user: User,
+    *,
+    channel: NotificationChannel,
+    kind: NotificationKind,
+) -> tuple[NotificationChannel, ...]:
+    """Preferences to try after ``channel`` fails for good.
+
+    Reconstructs what ``dispatch`` put on the job when it queued the row.
+    Built from the user's *current* prefs, which is the only list we have
+    — a channel they have since dropped yields ``()``, meaning the queued
+    channel is tried on its own rather than falling through to something
+    the user no longer asked for.
+    """
+    prefs = _user_prefs(user)
+    if channel not in prefs:
+        return ()
+    rest = prefs[prefs.index(channel) + 1 :]
+    if _email_is_a_copy(kind, prefs):
+        rest = [c for c in rest if c is not NotificationChannel.email]
+    return tuple(rest)
+
+
 def _persist_ledger(
     session: Session,
     *,
@@ -229,6 +283,16 @@ def _submit_pending_deliveries(session: SASession) -> None:
 def _drop_pending_deliveries(session: SASession) -> None:
     # The ticket the alert was about never happened.
     session.info.pop(_PENDING_KEY, None)
+
+
+def submit_delivery_job(job: DeliveryJob) -> None:
+    """Hand ``job`` to the worker now, with no transaction to wait for.
+
+    ``dispatch`` never does this — its ledger row is still uncommitted, so
+    it goes through :func:`_hand_off` instead. Reconciliation does: its
+    rows were committed long ago, by a process that is no longer running.
+    """
+    _submit(job)
 
 
 def _submit(job: DeliveryJob) -> None:
@@ -306,12 +370,12 @@ def _shed_to_local_channel(job: DeliveryJob) -> None:
 
         for channel, notifier in candidates:
             outcome = deliver_via(notifier, user=user, payload=job.payload)
-            if outcome is DeliveryOutcome.delivered:
+            if outcome in SENT_OUTCOMES:
                 _resolve_ledger_row(
                     session,
                     job.notification_id,
                     channel=channel,
-                    status_value=NotificationStatus.delivered,
+                    status_value=_status_for(outcome),
                 )
                 return
 
@@ -325,14 +389,52 @@ def _shed_to_local_channel(job: DeliveryJob) -> None:
         )
 
 
+def _status_for(outcome: DeliveryOutcome) -> NotificationStatus:
+    """Ledger status for a send that left the machine successfully.
+
+    The two differ by exactly one thing: whether anybody has promised to
+    tell us what happened next. ``accepted`` comes from a gateway that
+    owes us a delivery receipt, so the row waits at ``sent`` for it
+    instead of claiming an arrival nobody has witnessed.
+    """
+    return (
+        NotificationStatus.sent
+        if outcome is DeliveryOutcome.accepted
+        else NotificationStatus.delivered
+    )
+
+
 def _resolve_ledger_row(
     session: Session,
     notification_id: uuid.UUID | None,
     *,
     channel: NotificationChannel,
     status_value: NotificationStatus,
+    upgrade: bool = False,
 ) -> None:
     """Flip a ``queued`` row to its final channel and status.
+
+    ``queued`` is the only state this may overwrite. A row that already
+    reads ``delivered`` or ``failed`` has been settled by somebody — the
+    original worker finishing just after reconciliation handed the job out
+    again, a second replica, a job that outlived its own process — and the
+    later writer is not the one holding the truth. Refusing here is what
+    stops a reconciled retry from stamping ``failed`` over a delivery that
+    really happened.
+
+    ``upgrade`` is the one documented exception, and only ever toward
+    ``delivered``: a shed job settles the row on a local fallback, and the
+    parked remote send that lands afterwards is *supposed* to move it to
+    the channel the user actually ranked higher.
+
+    That the exception stops at ``delivered`` now does a second job. A
+    parked SMS that comes back ``accepted`` would want to write ``sent``,
+    and ``sent`` is *weaker* than the local delivery already recorded —
+    trading a channel the customer demonstrably received for one that
+    might yet fail. So it is refused like any other late writer, and the
+    receipt that follows finds a row that is no longer SMS's to settle
+    (:func:`record_delivery_receipt` re-checks the channel for exactly
+    this reason).
 
     ``notification_id`` is ``None`` for the email copy, which never owned
     a row — see :func:`_try_email_copy`.
@@ -348,10 +450,52 @@ def _resolve_ledger_row(
             extra={"notification_id": str(notification_id)},
         )
         return
+    settled = row.status != NotificationStatus.queued.value
+    if settled and not (upgrade and status_value is NotificationStatus.delivered):
+        logger.warning(
+            "notification_delivery_row_already_settled",
+            extra={
+                "notification_id": str(notification_id),
+                "current_status": row.status,
+                "attempted_status": status_value.value,
+            },
+        )
+        return
     row.channel = channel.value
     row.status = status_value.value
     session.add(row)
     session.commit()
+
+
+def _mark_attempt(session: Session, notification_id: uuid.UUID | None) -> None:
+    """Record that this row's message is about to be handed to a gateway.
+
+    Committed *before* the provider call, on purpose. The ledger cannot
+    tell us afterwards whether a send that died mid-flight reached anyone
+    — the process that knew is gone — so the only honest signal is one
+    written while we still had the chance. ``delivery_attempts == 0`` then
+    means "provably never sent", which is the only case reconciliation is
+    allowed to re-send.
+
+    Best-effort: a counter we failed to bump must not stop the send. The
+    cost of losing it is that a crashed attempt looks un-attempted and may
+    be re-sent once, which is exactly where we were before.
+    """
+    if notification_id is None:
+        return
+    row = session.get(Notification, notification_id)
+    if row is None:
+        return
+    row.delivery_attempts += 1
+    session.add(row)
+    try:
+        session.commit()
+    except Exception:  # noqa: BLE001 — never block a send on bookkeeping
+        logger.exception(
+            "notification_delivery_attempt_not_recorded",
+            extra={"notification_id": str(notification_id)},
+        )
+        session.rollback()
 
 
 def _record_failure(
@@ -392,6 +536,11 @@ def deliver_job(job: DeliveryJob) -> DeliveryAttempt:
     ``fallback_channels`` in order, and only records ``failed`` once the
     list is exhausted. A transient failure returns without touching the
     ledger, leaving the row ``queued`` for the retry.
+
+    Every send that leaves the machine is announced in the ledger first
+    (:func:`_mark_attempt`). Getting killed between that write and the
+    provider's answer is precisely the case reconciliation must not
+    re-send, and this is the only place that can leave a trace of it.
     """
     registry = get_registry()
     with _open_session() as session:
@@ -410,16 +559,29 @@ def deliver_job(job: DeliveryJob) -> DeliveryAttempt:
             notifier = registry.get(channel)
             if notifier is not None:
                 last_tried = channel
-                outcome = deliver_via(notifier, user=user, payload=job.payload)
+                if channel in REMOTE_CHANNELS:
+                    # Only channels that reach a third party can leave a
+                    # message we cannot see the fate of. An in-process one
+                    # settles the row in this same session or not at all.
+                    _mark_attempt(session, job.notification_id)
+                outcome = deliver_via(
+                    notifier,
+                    user=user,
+                    # Only here does a send know which row it answers for,
+                    # which is what a gateway needs in order to quote it
+                    # back on a delivery receipt.
+                    payload=job.payload.for_ledger_row(job.notification_id),
+                )
 
-                if outcome is DeliveryOutcome.delivered:
+                if outcome in SENT_OUTCOMES:
                     _resolve_ledger_row(
                         session,
                         job.notification_id,
                         channel=channel,
-                        status_value=NotificationStatus.delivered,
+                        status_value=_status_for(outcome),
+                        upgrade=job.upgrade_only,
                     )
-                    return DeliveryAttempt(DeliveryOutcome.delivered)
+                    return DeliveryAttempt(outcome)
 
                 if outcome is DeliveryOutcome.transient and not job.last_attempt:
                     # Resume on *this* channel, which may already be past
@@ -447,6 +609,246 @@ def deliver_job(job: DeliveryJob) -> DeliveryAttempt:
                 _record_failure(session, job, channel=last_tried)
                 return DeliveryAttempt(DeliveryOutcome.permanent)
             channel = remaining.pop(0)
+
+
+# --- delivery receipts --------------------------------------------------
+
+
+def record_delivery_receipt(
+    session: Session,
+    *,
+    notification_id: uuid.UUID,
+    receipt: ReceiptOutcome,
+    provider_message_id: str | None = None,
+    error_code: str | None = None,
+) -> Notification | None:
+    """Apply a carrier's verdict to the row that send was made for.
+
+    The counterpart to :func:`_resolve_ledger_row`, and deliberately not
+    the same function. That one closes a row the *worker* owns and knows
+    nothing beyond "the gateway took it"; this one arrives minutes later,
+    from outside, on a row that may have moved on since — so the rules
+    about what it may overwrite are different, and live in
+    :func:`werefa.notifications.domain.receipts.decide_receipt`.
+
+    Returns the row when the receipt changed something, ``None`` when it
+    did not. ``None`` is the ordinary case for the intermediate callbacks
+    Twilio sends on the way (``sending``, ``sent``) and for duplicates,
+    so callers must not read it as a failure — the webhook answers 204
+    either way, because asking Twilio to retry a callback we understood
+    perfectly well and chose to ignore just brings it back again.
+    """
+    row = session.get(Notification, notification_id)
+    if row is None:
+        # The ticket (and its cascade) went away, or the id in the
+        # callback URL is not one of ours.
+        logger.warning(
+            "notification_receipt_row_missing",
+            extra={"notification_id": str(notification_id)},
+        )
+        return None
+
+    channel = _channel_of(row.channel)
+    if channel not in RECEIPT_CHANNELS:
+        # The send fell through to another channel, or an overload shed
+        # settled the row locally. Either way this row is no longer a
+        # record of the SMS the carrier is talking about.
+        logger.info(
+            "notification_receipt_channel_moved_on",
+            extra={
+                "notification_id": str(notification_id),
+                "channel": row.channel,
+                "receipt": receipt.value,
+            },
+        )
+        return None
+
+    new_status = decide_receipt(
+        current_status=_status_of(row.status),
+        current_channel=channel,
+        receipt=receipt,
+    )
+
+    changed = False
+    if provider_message_id and row.provider_message_id != provider_message_id:
+        # Recorded even when the status does not move: the first callback
+        # is usually an intermediate one, and having the SID on the row
+        # from that moment is what makes a support question ("what
+        # happened to this alert?") answerable in Twilio's console.
+        row.provider_message_id = provider_message_id[:64]
+        changed = True
+    if new_status is not None:
+        if new_status is NotificationStatus.failed:
+            row.delivery_error_code = error_code[:16] if error_code else None
+        else:
+            # A later success clears a code from an earlier attempt, so
+            # the row never reads "delivered, because of error 30003".
+            row.delivery_error_code = None
+        row.status = new_status.value
+        changed = True
+
+    if not changed:
+        return None
+
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    logger.info(
+        "notification_receipt_recorded",
+        extra={
+            "notification_id": str(notification_id),
+            "kind": row.kind,
+            "receipt": receipt.value,
+            "status": row.status,
+            "error_code": row.delivery_error_code,
+        },
+    )
+    return row
+
+
+@dataclass(frozen=True)
+class PromptDelivery:
+    """What became of the last alert of a given kind for one ticket.
+
+    ``reach`` is the answer callers act on; ``channel`` and ``status`` are
+    the evidence behind it, carried so a log line can distinguish the
+    three very different situations that all reduce to ``not_reached``:
+
+    * ``sms``/``failed`` — a carrier told us it bounced. One customer's
+      bad number.
+    * ``sms``/``sent`` aged out — no receipt ever came. A *run* of these
+      is a status-callback URL that does not resolve, which otherwise
+      looks exactly like a line full of unreachable customers.
+    * ``logger``/``delivered`` — the customer has no reachable channel at
+      all, so the backstop was the only thing that "worked".
+
+    Only the first is really about the customer, and telling them apart
+    from the board is impossible without this.
+    """
+
+    reach: NotificationReach
+    channel: NotificationChannel | None = None
+    status: NotificationStatus | None = None
+
+    UNKNOWN: ClassVar[PromptDelivery]
+    """Stand-in for a ticket we never prompted — see :func:`alert_reach`."""
+
+
+PromptDelivery.UNKNOWN = PromptDelivery(NotificationReach.unconfirmed)
+
+
+def alert_reach(
+    session: Session,
+    *,
+    ticket_ids: list[uuid.UUID],
+    kinds: frozenset[NotificationKind],
+    now: datetime | None = None,
+) -> dict[uuid.UUID, PromptDelivery]:
+    """For each ticket, did our most recent alert of these kinds land?
+
+    One query for the whole line rather than one per ticket: the callers
+    are the liveness sync loop and the staff board, both of which walk
+    every watched ticket on every poll.
+
+    The most recent prompt that actually *decided* something wins —
+    ``confirmed`` or ``not_reached``. Rows in between that resolved to
+    ``unconfirmed`` are stepped over rather than allowed to overwrite,
+    because ``unconfirmed`` is the absence of information and cannot
+    displace information we have.
+
+    That distinction is load-bearing, not pedantry. Parking an
+    unreachable customer sends them a "your spot is held" notification,
+    which is itself a prompt; it lands "delivered" on the websocket
+    channel, whose delivery nobody can vouch for. Taking the newest row
+    unconditionally would let the hold we granted *because* we could not
+    reach them launder the ticket back to "we do not know" — and the
+    next window would flag them on exactly the silence the hold existed
+    to excuse.
+
+    Row age is supplied along with the pair, because "still waiting on a
+    receipt" is only an open question for as long as a receipt could
+    plausibly still arrive — see :func:`reach_of` and
+    ``NOTIFICATION_RECEIPT_GRACE_SECONDS``.
+
+    A ticket with no matching row is absent from the result; callers read
+    that as :attr:`PromptDelivery.UNKNOWN`, since nothing was asked and
+    nothing therefore failed.
+    """
+    if not ticket_ids:
+        return {}
+    rows = session.exec(
+        select(Notification)
+        .where(col(Notification.ticket_id).in_(ticket_ids))
+        .where(col(Notification.kind).in_([k.value for k in kinds]))
+        .order_by(col(Notification.created_at).desc())
+    ).all()
+
+    now = now or utcnow()
+    grace = settings.NOTIFICATION_RECEIPT_GRACE_SECONDS
+    out: dict[uuid.UUID, PromptDelivery] = {}
+    for row in rows:
+        # Ordered newest first, so the first *decided* hit per ticket is
+        # the latest thing we actually know.
+        if row.ticket_id is None:
+            continue
+        if out.get(row.ticket_id, PromptDelivery.UNKNOWN).reach is not (
+            NotificationReach.unconfirmed
+        ):
+            continue
+        channel = _channel_of(row.channel)
+        status = _status_of(row.status)
+        entry = PromptDelivery(
+            reach=reach_of(
+                channel,
+                status,
+                age_seconds=_row_age_seconds(row.created_at, now),
+                resolution_grace_seconds=grace,
+            ),
+            channel=channel,
+            status=status,
+        )
+        # Keep the newest row's evidence when nothing is decided, so the
+        # diagnostic fields describe the latest attempt either way.
+        if row.ticket_id not in out or entry.reach is not (
+            NotificationReach.unconfirmed
+        ):
+            out[row.ticket_id] = entry
+    return out
+
+
+def _row_age_seconds(
+    created_at: datetime | None, now: datetime
+) -> float | None:
+    """Age of a ledger row, or ``None`` when it cannot be measured.
+
+    A row with no ``created_at`` yields ``None``, which keeps its pending
+    status readable as an open question rather than ageing it out on a
+    clock we do not have. Naive timestamps are treated as ``now``'s zone —
+    the column is ``timezone=True``, but an older build or a test stub may
+    have written one without, and subtracting mixed awareness raises.
+    """
+    if created_at is None:
+        return None
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=now.tzinfo)
+    return (now - created_at).total_seconds()
+
+
+def _channel_of(raw: str) -> NotificationChannel | None:
+    """The ledger stores plain strings, so a value this build does not
+    know about (a rollback, a hand-edited row) must read as ``None``
+    rather than raise inside a webhook or a queue poll."""
+    try:
+        return NotificationChannel(raw)
+    except ValueError:
+        return None
+
+
+def _status_of(raw: str) -> NotificationStatus | None:
+    try:
+        return NotificationStatus(raw)
+    except ValueError:
+        return None
 
 
 def _defers(channel: NotificationChannel, notifier: Notifier) -> bool:
@@ -527,10 +929,7 @@ def dispatch(
     payload = payload.with_default_time()
     registry = get_registry()
     prefs = _user_prefs(user)
-    defer_email = (
-        payload.kind in EMAIL_COPY_KINDS
-        and NotificationChannel.email in prefs
-    )
+    defer_email = _email_is_a_copy(payload.kind, prefs)
 
     def _still_to_try(after: int) -> tuple[NotificationChannel, ...]:
         return tuple(
@@ -540,6 +939,7 @@ def dispatch(
         )
 
     delivered_via: NotificationChannel | None = None
+    delivered_status = NotificationStatus.delivered
     queued_via: NotificationChannel | None = None
     fallbacks: tuple[NotificationChannel, ...] = ()
     skipped: list[NotificationChannel] = []
@@ -553,13 +953,14 @@ def dispatch(
             queued_via = channel
             fallbacks = _still_to_try(index)
             break
-        try:
-            ok = notifier.send(user=user, payload=payload)
-        except Exception:  # noqa: BLE001 — never let a notifier crash dispatch
-            logger.exception("notifier_failed", extra={"channel": channel.value})
-            ok = False
-        if ok:
+        # The tri-state, not the boolean: an in-process channel can also
+        # take a message without anybody being able to say a person
+        # received it (a websocket publish behind Redis), and the ledger
+        # has somewhere to put that now.
+        outcome = deliver_via(notifier, user=user, payload=payload)
+        if outcome in SENT_OUTCOMES:
             delivered_via = channel
+            delivered_status = _status_for(outcome)
             break
         skipped.append(channel)
 
@@ -568,7 +969,7 @@ def dispatch(
         final_status = NotificationStatus.queued
     else:
         final_status = (
-            NotificationStatus.delivered
+            delivered_status
             if delivered_via is not None
             else NotificationStatus.failed
         )
@@ -729,21 +1130,22 @@ def count_unread_notifications(session: Session, *, user: User) -> int:
 
 
 def _ticket_position(session: Session, ticket: QueueEntry) -> int:
-    statement = (
-        select(func.count())
-        .select_from(QueueEntry)
-        .where(QueueEntry.service_item_id == ticket.service_item_id)
-        .where(
-            col(QueueEntry.status).in_(
-                (TicketStatus.waiting.value, TicketStatus.serving.value)
-            )
-        )
-        .where(QueueEntry.ticket_number <= ticket.ticket_number)
-    )
-    raw = session.exec(statement).one()
-    if isinstance(raw, tuple):
-        raw = raw[0]
-    return int(raw or 0)
+    """Queue depth for alert thresholds, in Call Next order.
+
+    These alerts say "you're next" and "start heading over", so they only
+    mean anything if they track the ticket the counter is actually about
+    to serve. Anchoring them to ticket numbers instead — the old
+    behaviour, defended as "stable" — sent "you're next" to whoever held
+    the lowest number while Call Next served a VIP issued minutes later,
+    and the person walking to the counter was the wrong one.
+
+    Parked spots are skipped for the same reason: Call Next passes over
+    them, so they do not stand between anybody and the counter. See
+    :mod:`werefa.queue.application.line_order`.
+    """
+    from werefa.queue.application import line_order
+
+    return line_order.callable_position(session, ticket)
 
 
 def evaluate_smart_alerts_for_service_line(
@@ -758,7 +1160,7 @@ def evaluate_smart_alerts_for_service_line(
     is idempotent thanks to ``last_alert_position`` and safe to invoke
     even when nothing changed.
     """
-    from werefa.queue.application import liveness_service
+    from werefa.queue.application import line_order, liveness_service
     from werefa.realtime.notify import notify_queue_subscribers
 
     liveness_touched = liveness_service.sync_liveness_for_service_line(
@@ -774,7 +1176,7 @@ def evaluate_smart_alerts_for_service_line(
             )
         )
         .where(col(QueueEntry.user_id).is_not(None))
-        .order_by(col(QueueEntry.ticket_number))
+        .order_by(*line_order.call_order())
     ).all()
 
     has_serving_ahead = any(
@@ -784,6 +1186,14 @@ def evaluate_smart_alerts_for_service_line(
     fired: list[Notification] = []
     for ticket in rows:
         if ticket.status == TicketStatus.serving.value:
+            continue
+        if line_order.is_held(ticket):
+            # Their spot is parked: Call Next is deliberately passing over
+            # them, so "you're next — head to the counter now" would be a
+            # lie, and telling a parked customer to hurry contradicts the
+            # hold notification they just got. ``last_alert_position`` is
+            # left untouched so the real alert still fires once the park
+            # ends.
             continue
         pos = _ticket_position(session, ticket)
         if pos < 1:
@@ -922,10 +1332,15 @@ __all__ = [
     "NotificationKind",
     "EMAIL_COPY_KINDS",
     "REMOTE_CHANNELS",
+    "PromptDelivery",
+    "alert_reach",
     "count_unread_notifications",
     "deliver_job",
+    "delivery_fallbacks",
     "dispatch",
+    "record_delivery_receipt",
     "get_delivery_queue",
+    "submit_delivery_job",
     "set_delivery_queue",
     "set_delivery_session_factory",
     "evaluate_smart_alerts_for_service_line",
